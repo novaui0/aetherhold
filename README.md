@@ -11,6 +11,9 @@ is plain ES modules with a vendored copy of three.js (works offline).
 ## Run it
 
 ```bash
+#First, open the folder using the command prompt (cmd).
+cd aetherhold
+
 # Host the realm on http://localhost:8080 (prints the admin panel link)
 python server.py
 
