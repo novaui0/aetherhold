@@ -21,6 +21,8 @@ python server.py --port 9000 --room "The Gilded Flagon" --password swordfish
 python server.py --connect http://192.168.1.20:8080
 ```
 
+cd aetherhold
+
 Hosting prints the local and LAN addresses to share, plus the warden's panel URL
 (`http://127.0.0.1:8080/admin?key=…`). `--no-browser` skips opening a tab,
 `--host 127.0.0.1` keeps it loopback-only, and `--theme moonlit|frost` picks the
