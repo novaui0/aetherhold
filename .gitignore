@@ -1,0 +1,14 @@
+# runtime state
+aetherhold.db
+aetherhold.db-shm
+aetherhold.db-wal
+bans.json
+server.log
+*.log
+
+# python
+__pycache__/
+*.pyc
+
+# tooling scratch
+.tmp_i18n/
