@@ -166,50 +166,64 @@ export class AudioEngine {
     }
     this.musicSources = [];
 
-    const build = this.tracks[this.trackIndex];
-    const track = typeof build === "function" ? build() : build;
-    if (!track) return;
-
-    // Prepare a music bus if it doesn't exist yet.
     if (!this.musicGain) {
       this.musicGain = ctx.createGain();
       this.musicGain.gain.value = this.muted ? 0 : (this.settings.music / 100) * 0.5;
       this.musicGain.connect(this.master);
     }
 
-    for (const layer of track) {
-      const source = ctx.createBufferSource();
-      source.buffer = layer.buffer;
-      source.loop = true;
-      let node = source;
-      if (layer.filter) {
-        const f = ctx.createBiquadFilter();
-        f.type = layer.filter.type;
-        f.frequency.value = layer.filter.frequency;
-        if (layer.filter.Q) f.Q.value = layer.filter.Q;
-        source.connect(f);
-        node = f;
-      }
-      if (layer.gain !== undefined) {
-        const g = ctx.createGain();
-        g.gain.value = layer.gain;
-        node.connect(g);
-        node = g;
-      }
-      node.connect(this.musicGain);
-      source.start();
-      this.musicSources.push(source);
-    }
-
-    // Next track after the first one ends (loop each track a few times then rotate).
-    if (this.musicTimer) clearTimeout(this.musicTimer);
-    const nextIn = (track[0]?.buffer?.duration || 8) * 2 + 1.2;
+    const build = this.tracks[this.trackIndex];
     this.currentTrackName = this.trackNames[this.trackIndex] || "Aetherhold";
-    this.musicTimer = setTimeout(() => {
-      if (!this.playingMusic) return;
-      this.trackIndex = (this.trackIndex + 1) % this.tracks.length;
-      this._playCurrentTrack();
-    }, Math.max(6, nextIn * 1000));
+    this.musicGen = (this.musicGen || 0) + 1;
+    const generation = this.musicGen;
+
+    // Layers are synthesised one at a time, yielding to the browser between
+    // each. Building the whole track in one go blocks the main thread for
+    // seconds, which freezes the game the moment the playlist advances.
+    const track = typeof build === "function" ? build() : build;
+    if (!track) return;
+    let index = 0;
+    const nextLayer = () => {
+      if (!this.playingMusic || this.musicGen !== generation) return;
+      const layer = track[index];
+      index += 1;
+      if (layer) {
+        const source = ctx.createBufferSource();
+        source.buffer = layer.buffer;
+        source.loop = true;
+        let node = source;
+        if (layer.filter) {
+          const f = ctx.createBiquadFilter();
+          f.type = layer.filter.type;
+          f.frequency.value = layer.filter.frequency;
+          if (layer.filter.Q) f.Q.value = layer.filter.Q;
+          source.connect(f);
+          node = f;
+        }
+        if (layer.gain !== undefined) {
+          const g = ctx.createGain();
+          g.gain.value = layer.gain;
+          node.connect(g);
+          node = g;
+        }
+        node.connect(this.musicGain);
+        source.start();
+        this.musicSources.push(source);
+      }
+      if (index < track.length) {
+        setTimeout(nextLayer, 0);
+        return;
+      }
+      // Whole track is live: schedule the next one.
+      if (this.musicTimer) clearTimeout(this.musicTimer);
+      const duration = track[0]?.buffer?.duration || 6;
+      this.musicTimer = setTimeout(() => {
+        if (!this.playingMusic) return;
+        this.trackIndex = (this.trackIndex + 1) % this.tracks.length;
+        this._playCurrentTrack();
+      }, Math.max(4000, duration * 2 * 1000));
+    };
+    nextLayer();
   }
 
   tone({ freq = 440, type = "sine", duration = 0.18, gain = 0.08, slide = 0, delay = 0 }) {
@@ -266,9 +280,12 @@ export class AudioEngine {
   _buildBuffer(duration, fill) {
     const ctx = this.ensure();
     if (!ctx) throw new Error("no audio context");
-    const buf = ctx.createBuffer(1, ctx.sampleRate * duration, ctx.sampleRate);
+    // 22 kHz is plenty for these lo-fi war drums, and it halves the number of
+    // samples we have to synthesise. WebAudio resamples on playback.
+    const rate = Math.min(16000, ctx.sampleRate);
+    const buf = ctx.createBuffer(1, Math.floor(rate * duration), rate);
     const data = buf.getChannelData(0);
-    fill(data, ctx.sampleRate);
+    fill(data, rate);
     return buf;
   }
 
@@ -290,49 +307,50 @@ export class AudioEngine {
     });
   }
 
+  // One drum hit is synthesised, then copied across the beat grid. Filling
+  // every sample with sin()/exp() took hundreds of milliseconds per layer, which
+  // stuttered the page whenever the playlist advanced.
   _kickBuffer(duration, tempo = 92) {
     return this._buildBuffer(duration, (data, sr) => {
-      const beat = sr / (tempo / 60);
-      for (let start = 0; start < data.length - beat; start += beat) {
-        const len = Math.min(beat, data.length - start);
-        for (let i = 0; i < len; i += 1) {
-          const t = i / sr;
-          const env = Math.exp(-t * 26);
-          const osc = Math.sin(2 * Math.PI * 55 * t) * 0.9
-            + Math.sin(2 * Math.PI * 110 * t) * 0.4;
-          data[start + i] += osc * env * 0.9;
-        }
+      const beat = Math.max(64, Math.floor(sr / (tempo / 60)));
+      const hit = new Float32Array(beat);
+      for (let i = 0; i < beat; i += 1) {
+        const t = i / sr;
+        const env = Math.exp(-t * 26);
+        hit[i] = (Math.sin(2 * Math.PI * 55 * t) * 0.9 + Math.sin(2 * Math.PI * 110 * t) * 0.4) * env * 0.9;
+      }
+      for (let start = 0; start < data.length; start += beat) {
+        data.set(hit.subarray(0, Math.min(beat, data.length - start)), start);
       }
     });
   }
 
   _hatBuffer(duration, tempo = 92, dense = 1) {
     return this._buildBuffer(duration, (data, sr) => {
-      const beat = sr / (tempo / 60);
-      for (let start = 0; start < data.length; start += beat / dense) {
-        const len = Math.min(beat / dense, data.length - start);
-        for (let i = 0; i < len; i += 1) {
-          const t = i / sr;
-          const env = Math.exp(-t * 40);
-          data[start + i] += (Math.random() * 2 - 1) * env * 0.12 * dense;
-        }
+      const step = Math.max(32, Math.floor(sr / (tempo / 60) / dense));
+      const hit = new Float32Array(step);
+      for (let i = 0; i < step; i += 1) {
+        const t = i / sr;
+        hit[i] = (Math.random() * 2 - 1) * Math.exp(-t * 40) * 0.12 * dense;
+      }
+      for (let start = 0; start < data.length; start += step) {
+        const len = Math.min(step, data.length - start);
+        for (let i = 0; i < len; i += 1) data[start + i] += hit[i];
       }
     });
   }
 
   _padBuffer(duration, freqs, tempo = 70) {
     return this._buildBuffer(duration, (data, sr) => {
-      const beat = sr / (tempo / 60);
-      const env = new Float32Array(data.length);
-      for (let i = 0; i < data.length; i += 1) {
-        const t = i / sr;
-        env[i] = 0.5 + 0.5 * Math.sin(2 * Math.PI * (1 / (beat / sr)) * i);
-      }
+      // Slow swell, recomputed once per 64 samples instead of per sample.
+      const swellRate = (tempo / 60) / (sr * 1.0);
       for (const f of freqs) {
+        let swell = 0.5;
         for (let i = 0; i < data.length; i += 1) {
-          const t = i / sr;
-          const w = Math.sin(2 * Math.PI * f * t);
-          data[i] += w * 0.12 * env[i];
+          if (i % 64 === 0) {
+            swell = 0.5 + 0.5 * Math.sin(2 * Math.PI * swellRate * i);
+          }
+          data[i] += Math.sin(2 * Math.PI * f * i / sr) * 0.12 * swell;
         }
       }
     });
@@ -342,12 +360,15 @@ export class AudioEngine {
     return this._buildBuffer(duration, (data, sr) => {
       for (let i = 0; i < data.length; i += 1) {
         const t = i / sr;
-        let s = 0;
-        for (let h = 1; h <= 6; h += 1) {
-          const f = freq * h + detune * (h - 1);
-          s += Math.sin(2 * Math.PI * f * t) / h;
+        if (type === "sawtooth") {
+          let s = 0;
+          for (let h = 1; h <= 4; h += 1) {
+            s += Math.sin(2 * Math.PI * (freq * h + detune * (h - 1)) * t) / h;
+          }
+          data[i] += s * 0.5 * gain;
+        } else {
+          data[i] += Math.sin(2 * Math.PI * freq * t) * gain;
         }
-        data[i] += (type === "sawtooth" ? s * 0.5 : Math.sin(2 * Math.PI * freq * t)) * gain;
       }
     });
   }
@@ -365,14 +386,13 @@ export class AudioEngine {
           const t = i / sr;
           const e = Math.exp(-t * 3.2);
           data[start + i] += Math.sin(2 * Math.PI * freq * t) * accent * e;
-          data[start + i] += Math.sin(2 * Math.PI * freq * 2 * t) * 0.25 * accent * e;
         }
       }
     });
   }
 
   _trackCharge() {
-    const d = 9;
+    const d = 6;
     return [
       { buffer: this._kickBuffer(d, 104) },
       { buffer: this._hatBuffer(d, 104, 2), gain: 0.5 },
@@ -389,7 +409,7 @@ export class AudioEngine {
   }
 
   _trackMarch() {
-    const d = 10;
+    const d = 7;
     return [
       { buffer: this._kickBuffer(d, 118) },
       { buffer: this._hatBuffer(d, 118, 2), gain: 0.55 },
@@ -407,7 +427,7 @@ export class AudioEngine {
   }
 
   _trackHearth() {
-    const d = 10;
+    const d = 7;
     return [
       { buffer: this._noiseBuffer(d, 720, 0.5), gain: 0.3 },
       { buffer: this._droneBuffer(d, 65.4, "sawtooth", -8, 0.05) },
@@ -422,7 +442,7 @@ export class AudioEngine {
   }
 
   _trackStorm() {
-    const d = 9;
+    const d = 6;
     return [
       { buffer: this._noiseBuffer(d, 260, 0.9), gain: 0.5 },
       { buffer: this._noiseBuffer(d, 1600, 0.4), gain: 0.25 },
@@ -439,7 +459,7 @@ export class AudioEngine {
   }
 
   _trackLastStand() {
-    const d = 11;
+    const d = 8;
     return [
       { buffer: this._kickBuffer(d, 88) },
       { buffer: this._hatBuffer(d, 88, 3), gain: 0.6 },

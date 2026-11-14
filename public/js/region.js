@@ -555,6 +555,43 @@ export class Region {
     this._buildSites();
     this._buildPlazaInn();
     this._buildTruck();
+    this._buildTraffic();
+  }
+
+  // Parked and passing traffic. Small, cheap, and it is what makes the ring
+  // read as a road people use.
+  _buildTraffic() {
+    const palette = ["#8a97a8", "#b34a3a", "#3f5d78", "#c9b28a", "#5e6b57", "#7d6a8f"];
+    this.cars = [];
+    const park = (x, z, heading, colorIndex) => {
+      const car = createCar(palette[colorIndex % palette.length]);
+      car.position.set(x, 0, z);
+      car.rotation.y = heading;
+      this.scene.add(car);
+      this.cars.push(car);
+    };
+    // Two at the garage, one at the pumps, a pair at the camp, one at the depot.
+    const byKind = (kind) => this.sites.find((site) => site.kind === kind);
+    const garage = byKind("garage");
+    const fuel = byKind("fuel");
+    const camp = byKind("camp");
+    const warehouse = byKind("warehouse");
+    if (garage) {
+      park(garage.x + 9.5, garage.z - 3.5, 0.35, 0);
+      park(garage.x + 11.5, garage.z - 6.2, 0.2, 2);
+    }
+    if (fuel) park(fuel.x - 8.5, fuel.z + 4.5, -1.1, 1);
+    if (camp) {
+      park(camp.x + 7.5, camp.z + 6.0, 2.2, 3);
+      park(camp.x + 10.5, camp.z + 3.0, 2.4, 4);
+    }
+    if (warehouse) park(warehouse.x - 9.0, warehouse.z - 5.0, -0.4, 5);
+    // Traffic parked on the outer shoulder of the ring.
+    for (let i = 0; i < 5; i += 1) {
+      const angle = (i / 5) * TAU + 0.55;
+      const radius = RING_RADIUS - 5.2;
+      park(Math.cos(angle) * radius, Math.sin(angle) * radius, -angle + Math.PI / 2, i + 1);
+    }
   }
 
   _buildGround() {
@@ -929,6 +966,55 @@ export function createTruck(color = "#b34a3a") {
   contactShadow(truck, 4.6, 0.46);
   truck.userData = { wheels, headlights: [headlight, taillight] };
   return truck;
+}
+
+// A small road car: the thing you see parked at every stop, and what makes a
+// settlement read as inhabited rather than as three boxes and a pump.
+export function createCar(color = "#8a97a8") {
+  const car = new THREE.Group();
+  car.name = "car";
+  const paint = mat(color, { roughness: 0.34, metalness: 0.55 });
+  const paintDark = mat(new THREE.Color(color).multiplyScalar(0.62), { roughness: 0.5, metalness: 0.4 });
+  const glass = mat("#16202b", { metalness: 0.75, roughness: 0.08, opacity: 0.9 });
+  const chrome = mat("#cfd6de", { metalness: 0.92, roughness: 0.18 });
+  const tyre = mat("#141418", { roughness: 0.95 });
+  const lamp = mat("#fff6dd", { emissive: "#ffeec2", emissiveIntensity: 1.2, roughness: 0.2 });
+  const tail = mat("#ff453a", { emissive: "#ff2a1c", emissiveIntensity: 1.1, roughness: 0.3 });
+
+  // Lower body, sills and shoulder line.
+  box(car, 1.78, 0.5, 4.1, paint, [0, 0.62, 0]);
+  box(car, 1.83, 0.16, 4.12, paintDark, [0, 0.4, 0]);
+  box(car, 1.6, 0.22, 3.5, paint, [0, 0.86, -0.1]);
+  // Cabin: tapered greenhouse with a raked screen.
+  box(car, 1.5, 0.52, 1.9, paint, [0, 1.12, -0.15]);
+  box(car, 1.34, 0.46, 1.7, glass, [0, 1.2, -0.16]);
+  box(car, 1.42, 0.12, 1.6, paint, [0, 1.44, -0.3]);
+  box(car, 1.28, 0.42, 0.12, glass, [0, 1.16, 0.82], [-0.42, 0, 0]);
+  // Bonnet and boot creases.
+  box(car, 1.5, 0.04, 1.0, paint, [0, 0.88, 1.5]);
+  box(car, 1.5, 0.04, 0.8, paint, [0, 0.88, -1.6]);
+  // Lights, grille, bumpers, plate.
+  [-1, 1].forEach((side) => {
+    box(car, 0.42, 0.16, 0.1, lamp, [side * 0.58, 0.74, 2.02]);
+    box(car, 0.38, 0.14, 0.1, tail, [side * 0.6, 0.76, -2.03]);
+    box(car, 0.1, 0.12, 0.5, chrome, [side * 0.9, 1.02, 0.2]); // mirrors
+  });
+  box(car, 1.2, 0.16, 0.08, mat("#20242a"), [0, 0.62, 2.04]);
+  box(car, 1.78, 0.18, 0.2, paintDark, [0, 0.42, 2.02]);
+  box(car, 1.78, 0.18, 0.2, paintDark, [0, 0.42, -2.02]);
+  box(car, 0.4, 0.12, 0.04, mat("#e8e2d0"), [0, 0.52, -2.12]);
+  // Wheels with hubs.
+  const wheels = [];
+  [[0.84, 1.32], [-0.84, 1.32], [0.84, -1.3], [-0.84, -1.3]].forEach(([x, z]) => {
+    const tyreMesh = mesh(car, geo("carWheel", () => new THREE.CylinderGeometry(0.33, 0.33, 0.24, 16)), tyre,
+      [x, 0.33, z], [0, 0, Math.PI / 2]);
+    mesh(car, geo("carHub", () => new THREE.CylinderGeometry(0.18, 0.18, 0.26, 12)), chrome,
+      [x, 0.33, z], [0, 0, Math.PI / 2]);
+    wheels.push(tyreMesh);
+  });
+  contactShadow(car, 2.4, 0.42);
+  car.userData = { wheels };
+  return car;
 }
 
 export function createTowTruck() {

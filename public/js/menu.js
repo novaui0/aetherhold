@@ -459,10 +459,12 @@ export class MenuUI {
       });
     });
     this._bindSlider("set-scale", "scale", (v) => `${v}%`);
-    this._bindSlider("set-fov", "fov", (v) => `${v}°`);      this._bindSlider("set-master", "master", (v) => `${v}%`);
-      this._bindSlider("set-ambience", "ambience", (v) => `${v}%`);
-      this._bindSlider("set-music", "music", (v) => `${v}%`);
-    this._bindSlider("set-sens", "sensitivity", (v) => `${(v / 100).toFixed(1)}×`);      ["set-nameplates:nameplates", "set-shadows:shadows", "set-shake:shake", "set-sfx:sfx", "set-music:music"].forEach((pair) => {
+    this._bindSlider("set-fov", "fov", (v) => `${v}°`);
+    this._bindSlider("set-master", "master", (v) => `${v}%`);
+    this._bindSlider("set-ambience", "ambience", (v) => `${v}%`);
+    this._bindSlider("set-music", "music", (v) => `${v}%`);
+    this._bindSlider("set-sens", "sensitivity", (v) => `${(v / 100).toFixed(1)}×`);
+    ["set-nameplates:nameplates", "set-shadows:shadows", "set-shake:shake", "set-sfx:sfx"].forEach((pair) => {
       const [id, key] = pair.split(":");
       const input = $(id);
       input?.addEventListener("change", () => {
@@ -519,6 +521,7 @@ export class MenuUI {
     sync("set-fov", settings.fov, (v) => `${v}°`);
     sync("set-master", settings.master, (v) => `${v}%`);
     sync("set-ambience", settings.ambience, (v) => `${v}%`);
+    sync("set-music", Number(settings.music) || 55, (v) => `${v}%`);
     sync("set-sens", settings.sensitivity, (v) => `${(v / 100).toFixed(1)}×`);
 
     const checks = {

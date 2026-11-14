@@ -288,6 +288,10 @@ function write(key, value) {
 }
 
 export const settings = read(SETTINGS_KEY, DEFAULT_SETTINGS);
+// Older builds stored a boolean here; make sure the mixer always gets a number.
+if (typeof settings.music !== "number" || Number.isNaN(settings.music)) {
+  settings.music = DEFAULT_SETTINGS.music;
+}
 export const character = read(CHARACTER_KEY, DEFAULT_CHARACTER);
 if (!CLASSES[character.cls]) character.cls = "Adventurer";
 
