@@ -8,6 +8,7 @@
 [![Copilot eligible](https://img.shields.io/badge/Copilot-eligible-1abc9c?logo=github&logoColor=white)](https://github.com/features/copilot)
 [![Python 3.9](https://img.shields.io/badge/python-3.9+-blue?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Browser](https://img.shields.io/badge/browser-modern-blue?logo=firefox-browser&logoColor=white)](https://www.mozilla.org/firefox/)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/novaui0/aetherhold)
 
 A 3D chat & roleplay realm in the browser, served by a single standard-library
 Python file. Wanderers meet around a campfire in the Aetherhold — a neutral
