@@ -1,0 +1,10 @@
+aetherhold.db
+aetherhold.db-shm
+aetherhold.db-wal
+bans.json
+server.log
+*.log
+__pycache__
+*.pyc
+.tmp_i18n
+.git

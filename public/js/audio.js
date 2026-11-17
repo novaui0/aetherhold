@@ -11,6 +11,7 @@ export class AudioEngine {
     this.musicGain = null;
     this.started = false;
     this.muted = Boolean(settings.muted);
+    this.inMenu = true; // Start in menu mode, switch to false when world loads
 
     // Five synthetic tracks, each with a war/tavern/charge feel. Only the track
     // that is playing is synthesised, so starting the music never blocks the
@@ -47,6 +48,10 @@ export class AudioEngine {
   startAmbience() {
     const ctx = this.ensure();
     if (!ctx || this.started) return;
+    // Attempt to resume if suspended, but don't block - sound will play once resumed
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => { /* autoplay blocked */ });
+    }
     this.started = true;
 
     // Low drone: two detuned saws through a low-pass filter.
@@ -119,6 +124,12 @@ export class AudioEngine {
   // ── playlist control ──────────────────────────────────────────────────
   startMusic() {
     if (!this.settings || this.settings.music <= 0) return;
+    const ctx = this.ensure();
+    if (!ctx) return;
+    // Attempt to resume if suspended, but don't block - music will play once resumed
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => { /* autoplay blocked */ });
+    }
     if (this.playingMusic) {
       // Restart the playlist from the beginning so the user hears track 1 first.
       this.trackIndex = 0;
@@ -158,7 +169,10 @@ export class AudioEngine {
   _playCurrentTrack() {
     const ctx = this.ensure();
     if (!ctx) return;
-    if (ctx.state === "suspended") ctx.resume();
+    // Attempt to resume if suspended, but don't block - track will play once resumed
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => { /* autoplay blocked */ });
+    }
 
     // Stop previous sources.
     for (const s of this.musicSources) {
@@ -227,10 +241,14 @@ export class AudioEngine {
   }
 
   tone({ freq = 440, type = "sine", duration = 0.18, gain = 0.08, slide = 0, delay = 0 }) {
-    if (!this.settings.sfx || this.muted) return;
+    if (!this.settings?.sfx && this.settings?.sfx !== undefined) return;
+    if (this.muted) return;
     const ctx = this.ensure();
     if (!ctx) return;
-    if (ctx.state === "suspended") ctx.resume();
+    // Attempt to resume if suspended, but don't block - tone will play once resumed
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => { /* context may be blocked */ });
+    }
     const start = ctx.currentTime + delay;
     const osc = ctx.createOscillator();
     const env = ctx.createGain();
@@ -247,8 +265,7 @@ export class AudioEngine {
 
   hover() { this.tone({ freq: 720, type: "sine", duration: 0.05, gain: 0.018 }); }
 
-  click() {
-    this.tone({ freq: 520, type: "triangle", duration: 0.09, gain: 0.05 });
+  click() { this.tone({ freq: 520, type: "triangle", duration: 0.09, gain: 0.05 });
     this.tone({ freq: 780, type: "sine", duration: 0.12, gain: 0.025, delay: 0.03 });
   }
 
@@ -259,12 +276,14 @@ export class AudioEngine {
   }
 
   enter() {
+    if (this.ctx && this.ctx.state === "suspended") this.ctx.resume();
     [392, 523.25, 659.25, 987.77].forEach((freq, i) => {
       this.tone({ freq, type: "triangle", duration: 1.4, gain: 0.055, delay: i * 0.1 });
     });
   }
 
   dice() {
+    if (this.ctx && this.ctx.state === "suspended") this.ctx.resume();
     for (let i = 0; i < 5; i += 1) {
       this.tone({ freq: 220 + Math.random() * 900, type: "square", duration: 0.05, gain: 0.03, delay: i * 0.055 });
     }

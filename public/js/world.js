@@ -1,15 +1,17 @@
-// Aetherhold — the 3D plaza where wanderers meet.
+// Aetherhold — the city district, its renderer and the player controller.
 
 import * as THREE from "../vendor/three.module.js";
 import { animateAvatar, avatarLabelTexture, buildAvatar, setAvatarWeapon } from "./character.js";
 import { THEMES } from "./store.js";
-import { Region, RING_RADIUS, createTruck, spinWheels } from "./region.js";
+import { City } from "./city.js";
+import { spinWheels } from "./vehicles.js";
+import { PostFX } from "./render/postfx.js";
+import { GtaHud } from "./gtaHud.js";
+import { kitMaterials } from "./render/kit.js";
 import { t } from "./i18n.js";
 
-const PLAZA_RADIUS = 19;
-const FIRE_CLEARANCE = 1.9;
-const WALK_SPEED = 3.2;
-const RUN_SPEED = 6.2;
+const WALK_SPEED = 3.6;
+const RUN_SPEED = 7.4;
 const EYE_HEIGHT = 1.63;
 const TAU = Math.PI * 2;
 
@@ -111,10 +113,12 @@ export class World {
     this.running = false;
     this.inputEnabled = true;
     this.keys = new Set();
+    // Kol girdileri ayrı tutulur: klavyenin keyup'ı kolun basılı tuşunu silmesin.
+    this.padKeys = new Set();
     this.yaw = Math.PI;
     this.pitch = 0.22;
     this.viewPitch = 0;
-    this.distance = 4.6;
+    this.distance = 3.7;
     this.firstPerson = false;
     this.locked = false;
     this.weapon = "";
@@ -140,9 +144,11 @@ export class World {
     this._chatCooldown = 0;
     this.inVehicle = false;
     this.vehicle = {
-      model: "truck", fuel: 240, tank: 240, condition: 100, capacity: 18000, cargoKg: 0,
-      consumption: 28, cash: 0, node: "", odometer: 0, speed: 0, heading: 0.9, rangeKm: 0,
+      model: "comet", fuel: 62, tank: 62, condition: 100, capacity: 180, cargoKg: 0,
+      consumption: 11, cash: 0, node: "", odometer: 0, speed: 0, heading: Math.PI / 2, rangeKm: 0,
     };
+    this.stats = { health: 100, armor: 0 };
+    this.areaName = "";
     this.vehicleSpeed = 0;
     this.onVehicleState = null;
     this.onNotice = null;
@@ -153,9 +159,61 @@ export class World {
     this._initRenderer();
     this._initScene();
     this._buildWorld();
-    this.region = new Region(this.scene, { world, language });
+    this.region = new City(this.scene, { world, language });
     this.truck = this.region.truck;
+    this.position.set(-12, 0, 6);
+    this.facing = Math.PI / 2;
+    this.yaw = -Math.PI / 2;
+    this.postfx = new PostFX(this.renderer, this.scene, this.camera, {
+      quality: this.settings.quality,
+      bloomStrength: 0.62,
+      bloomThreshold: 0.82,
+      exposure: 1.16,
+      vignette: 0.5,
+      grain: 0.022,
+      aberration: 0.0026,
+      saturation: 1.07,
+      contrast: 1.03,
+      enabled: this.settings.quality !== "low",
+    });
+    this.hud = new GtaHud();
+    this.hud.setMap(this.region.radarData());
+
+    // Sistemler (telefon, envanter, load screen) constructor'da değil,
+    // start() çağrısından önce initSystems() ile başlatılır.
+    this.playerId = this.worldData?.playerId || "local";
+    this.inventory = null;
+    this.phone = null;
+    this.phoneUI = null;
+    this.inventoryUI = null;
+    this.loadScreen = null;
+
     this._bindInput();
+  }
+
+  /**
+   * Telefon, envanter ve load screen sistemlerini başlatır.
+   * Bu method main.js tarafından world.start() öncesi çağrılır.
+   * Constructor'da async import yapmamak için ayrı method'dur.
+   */
+  async initSystems(playerId) {
+    this.playerId = playerId || this.playerId || "local";
+
+    const { Inventory } = await import("./inventory.js");
+    this.inventory = new Inventory(this.playerId);
+
+    const { PhoneSystem } = await import("./phone.js");
+    this.phone = new PhoneSystem(this.playerId);
+    this.phone.bindInventory(this.inventory);
+
+    const { PhoneUI } = await import("./phone-ui.js");
+    this.phoneUI = new PhoneUI(this, { phone: this.phone, inventory: this.inventory });
+
+    const { InventoryUI } = await import("./inventory-ui.js");
+    this.inventoryUI = new InventoryUI(this, { inventory: this.inventory, phone: this.phone });
+
+    const { LoadScreen } = await import("./loadscreen.js");
+    this.loadScreen = new LoadScreen(this);
   }
 
   // ── setup ────────────────────────────────────────────────────────────
@@ -223,40 +281,36 @@ export class World {
 
   _initScene() {
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(this.theme.fog);
-    this.scene.fog = new THREE.Fog(this.theme.fog, 40, 240);
+    // Dusk haze matched to the sky dome's horizon band, so distant towers melt
+    // into the same air the sky is painted with.
+    this.hazeColor = 0x8d7a83;
+    this.scene.background = new THREE.Color(0x1a2138);
+    this.scene.fog = new THREE.Fog(this.hazeColor, 95, 430);
 
-    this.camera = new THREE.PerspectiveCamera(this.settings.fov, 1, 0.045, 460);
+    this.camera = new THREE.PerspectiveCamera(this.settings.fov, 1, 0.06, 900);
     this.camera.position.set(0, 4, 12);
     this.camera.rotation.order = "YXZ";
 
     // The environment map now supplies most of the fill light, so the analytic
     // lights are dialled back to keep the grade from washing out.
-    this.scene.add(new THREE.HemisphereLight(0xb9c7ff, 0x1b1420, 1.2));
-    this.ambient = new THREE.AmbientLight(0x6a5f92, 0.7);
+    this.scene.add(new THREE.HemisphereLight(0xbcd0ff, 0x3a2c22, 0.85));
+    this.ambient = new THREE.AmbientLight(0x8a7d9c, 0.38);
     this.scene.add(this.ambient);
 
-    this.sun = new THREE.DirectionalLight(0xffd7a8, 1.5);
-    this.sun.position.set(-14, 20, 8);
+    this.sun = new THREE.DirectionalLight(0xffcf9a, 2.7);
+    this.sun.position.set(-42, 34, 26);
     this.sun.castShadow = Boolean(this.settings.shadows);
-    this.sun.shadow.mapSize.set(1024, 1024);
-    this.sun.shadow.camera.left = -26;
-    this.sun.shadow.camera.right = 26;
-    this.sun.shadow.camera.top = 26;
-    this.sun.shadow.camera.bottom = -26;
-    this.sun.shadow.camera.far = 120;
-    this.sun.shadow.bias = -0.0007;
+    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.shadow.camera.left = -46;
+    this.sun.shadow.camera.right = 46;
+    this.sun.shadow.camera.top = 46;
+    this.sun.shadow.camera.bottom = -46;
+    this.sun.shadow.camera.far = 190;
+    this.sun.shadow.bias = -0.0006;
+    this.sun.shadow.normalBias = 0.035;
     this.scene.add(this.sun);
     this.sun.target = new THREE.Object3D();
     this.scene.add(this.sun.target);
-
-    this.fireLight = new THREE.PointLight(new THREE.Color(this.theme.fire), 40, 30, 2);
-    this.fireLight.position.set(0, 1.3, 0);
-    this.fireLight.castShadow = false;
-    this.scene.add(this.fireLight);
-
-    this.emberTexture = makeEmberTexture();
-    this._disposables.push(this.emberTexture);
 
     // Real reflections for every standard material in the scene.
     this.envMap = this._makeEnvironmentMap();
@@ -265,289 +319,19 @@ export class World {
   }
 
   _buildWorld() {
-    this.plaza = new THREE.Group();
-    this.scene.add(this.plaza);
-
-    // Outer meadow.
-    this.grassTexture = makeGrassTexture();
-    this.cobbleTexture = makeCobbleTexture();
-    this._disposables.push(this.grassTexture, this.cobbleTexture);
-    const meadow = new THREE.Mesh(
-      new THREE.CircleGeometry(62, 56),
-      new THREE.MeshStandardMaterial({
-        map: this.grassTexture,
-        color: new THREE.Color(this.theme.ground).multiplyScalar(1.15),
-        roughness: 1,
-      })
-    );
-    meadow.rotation.x = -Math.PI / 2;
-    meadow.position.y = -0.06;
-    meadow.receiveShadow = true;
-    this.plaza.add(meadow);
-
-    // Stone plaza, laid as individual cobbles.
-    const plaza = new THREE.Mesh(
-      new THREE.CircleGeometry(PLAZA_RADIUS, 64),
-      new THREE.MeshStandardMaterial({
-        map: this.cobbleTexture,
-        bumpMap: this.cobbleTexture,
-        bumpScale: 0.35,
-        color: new THREE.Color(this.theme.ground).offsetHSL(0, -0.05, 0.22),
-        roughness: 0.95,
-        metalness: 0.04,
-      })
-    );
-    plaza.rotation.x = -Math.PI / 2;
-    plaza.position.y = 0;
-    plaza.receiveShadow = true;
-    this.plaza.add(plaza);
-
-    this.inlays = [];
-    [4.6, 8.4, 13.2, 17.4].forEach((radius, index) => {
-      const ring = new THREE.Mesh(
-        new THREE.RingGeometry(radius, radius + (index === 3 ? 0.22 : 0.09), 64),
-        new THREE.MeshBasicMaterial({ color: new THREE.Color(this.theme.fire), transparent: true, opacity: 0.24, side: THREE.DoubleSide, depthWrite: false })
-      );
-      ring.rotation.x = -Math.PI / 2;
-      ring.position.y = 0.012 + index * 0.001;
-      this.plaza.add(ring);
-      this.inlays.push(ring);
-    });
-
-    // Radial tiles.
-    const tileMaterial = new THREE.MeshStandardMaterial({ color: 0x2b2436, roughness: 0.95, flatShading: true });
-    for (let i = 0; i < 40; i += 1) {
-      const angle = (i / 40) * Math.PI * 2;
-      const tile = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.18, 0.34), tileMaterial);
-      tile.position.set(Math.cos(angle) * 9, 0.03, Math.sin(angle) * 9);
-      tile.rotation.y = -angle;
-      tile.rotation.z = (Math.random() - 0.5) * 0.03;
-      tile.receiveShadow = true;
-      this.plaza.add(tile);
-    }
-
-    // Perimeter stones.
-    const stoneMaterial = new THREE.MeshStandardMaterial({ color: 0x3d3448, roughness: 1, flatShading: true });
-    for (let i = 0; i < 26; i += 1) {
-      const angle = (i / 26) * Math.PI * 2 + 0.12;
-      const stone = new THREE.Mesh(new THREE.DodecahedronGeometry(0.34 + Math.random() * 0.16, 0), stoneMaterial);
-      stone.position.set(Math.cos(angle) * (PLAZA_RADIUS - 0.7), 0.14, Math.sin(angle) * (PLAZA_RADIUS - 0.7));
-      stone.rotation.set(Math.random(), Math.random(), Math.random());
-      this.plaza.add(shadowed(stone, true, true));
-    }
-
-    this._buildFire();
-    this._buildPillars();
-    this._buildTrees();
-    this._buildGrass();
-    this._buildLanterns();
-    this._buildDust();
-
+    // The city module owns the ground, roads, buildings and props. This keeps
+    // the container groups that the avatar and label systems still expect.
     this.avatarRoot = new THREE.Group();
     this.scene.add(this.avatarRoot);
   }
 
-  _buildFire() {
-    const fire = new THREE.Group();
-    fire.position.set(0, 0, 0);
-
-    const coalMaterial = new THREE.MeshStandardMaterial({ color: 0x241f2b, roughness: 1, flatShading: true });
-    for (let i = 0; i < 9; i += 1) {
-      const angle = (i / 9) * Math.PI * 2;
-      const stone = new THREE.Mesh(new THREE.DodecahedronGeometry(0.26, 0), coalMaterial);
-      stone.position.set(Math.cos(angle) * 1.15, 0.16, Math.sin(angle) * 1.15);
-      stone.rotation.set(Math.random(), Math.random(), Math.random());
-      fire.add(shadowed(stone, true, true));
-    }
-
-    const logMaterial = new THREE.MeshStandardMaterial({ color: 0x4a3126, roughness: 0.95, flatShading: true });
-    for (let i = 0; i < 5; i += 1) {
-      const log = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.11, 1.1, 6), logMaterial);
-      log.position.y = 0.18;
-      log.rotation.z = Math.PI / 2;
-      log.rotation.y = (i / 5) * Math.PI;
-      fire.add(shadowed(log, true, false));
-    }
-
-    this.flameMaterial = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(this.theme.fire),
-      transparent: true,
-      opacity: 0.85,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.flames = [];
-    for (let i = 0; i < 3; i += 1) {
-      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.36 - i * 0.08, 1.1 - i * 0.2, 7), this.flameMaterial.clone());
-      flame.position.y = 0.62 + i * 0.04;
-      flame.rotation.y = i;
-      fire.add(flame);
-      this.flames.push(flame);
-    }
-
-    // Ember plume above the fire.
-    const count = 90;
-    const positions = new Float32Array(count * 3);
-    const speeds = new Float32Array(count);
-    for (let i = 0; i < count; i += 1) {
-      positions[i * 3] = (Math.random() - 0.5) * 0.9;
-      positions[i * 3 + 1] = Math.random() * 3;
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 0.9;
-      speeds[i] = 0.35 + Math.random() * 0.8;
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    this.fireEmbers = new THREE.Points(
-      geometry,
-      new THREE.PointsMaterial({
-        size: 0.13,
-        map: this.emberTexture,
-        color: new THREE.Color(this.theme.fire),
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-        opacity: 0.9,
-      })
-    );
-    this.fireEmberSpeeds = speeds;
-    fire.add(this.fireEmbers);
-
-    this.scene.add(fire);
-    this.fire = fire;
-  }
-
-  _buildPillars() {
-    const pillarMaterial = new THREE.MeshStandardMaterial({ color: 0x4c4359, roughness: 0.9, flatShading: true });
-    this.pillars = new THREE.Group();
-    for (let i = 0; i < 7; i += 1) {
-      const angle = (i / 7) * Math.PI * 2 + 0.4;
-      const height = 2.4 + Math.random() * 2.6;
-      const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, height, 8), pillarMaterial);
-      pillar.position.set(Math.cos(angle) * 15.2, height / 2, Math.sin(angle) * 15.2);
-      pillar.rotation.z = (Math.random() - 0.5) * 0.08;
-      this.pillars.add(shadowed(pillar, true, true));
-
-      if (Math.random() > 0.4) {
-        const slab = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.22, 0.9), pillarMaterial);
-        slab.position.set(pillar.position.x, height + 0.1, pillar.position.z);
-        slab.rotation.y = Math.random();
-        this.pillars.add(shadowed(slab, true, true));
-      }
-    }
-    this.scene.add(this.pillars);
-  }
-
-  _buildTrees() {
-    this.trees = new THREE.Group();
-    const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x4b3a2a, roughness: 1, flatShading: true });
-    const leafMaterial = new THREE.MeshStandardMaterial({ color: 0x27402f, roughness: 1, flatShading: true });
-    for (let i = 0; i < 16; i += 1) {
-      const angle = (i / 16) * Math.PI * 2 + Math.random() * 0.3;
-      const radius = 25 + Math.random() * 14;
-      const height = 3 + Math.random() * 3.4;
-      const tree = new THREE.Group();
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.24, height * 0.55, 6), trunkMaterial);
-      trunk.position.y = height * 0.275;
-      const crown = new THREE.Mesh(new THREE.ConeGeometry(1.1 + Math.random() * 0.6, height * 0.8, 7), leafMaterial);
-      crown.position.y = height * 0.62;
-      tree.add(shadowed(trunk, true, true), shadowed(crown, true, true));
-      tree.position.set(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
-      this.trees.add(tree);
-    }
-    this.scene.add(this.trees);
-  }
-
-  _buildGrass() {
-    const geo = new THREE.ConeGeometry(0.035, 0.34, 4, 1, true);
-    const material = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(this.theme.ground).offsetHSL(0.02, 0.08, 0.02),
-      roughness: 1,
-      side: THREE.DoubleSide,
-    });
-    const count = 320;
-    const tufts = new THREE.InstancedMesh(geo, material, count);
-    const matrix = new THREE.Matrix4();
-    const quaternion = new THREE.Quaternion();
-    const scale = new THREE.Vector3();
-    const position = new THREE.Vector3();
-    for (let i = 0; i < count; i += 1) {
-      const angle = Math.random() * TAU;
-      const radius = PLAZA_RADIUS + 0.6 + Math.random() * 26;
-      position.set(Math.cos(angle) * radius, 0.15 * Math.random(), Math.sin(angle) * radius);
-      quaternion.setFromEuler(new THREE.Euler(
-        (Math.random() - 0.5) * 0.25, Math.random() * TAU, (Math.random() - 0.5) * 0.25
-      ));
-      const size = 0.6 + Math.random() * 1.2;
-      scale.set(size, size * (0.8 + Math.random() * 0.7), size);
-      matrix.compose(position, quaternion, scale);
-      tufts.setMatrixAt(i, matrix);
-    }
-    tufts.instanceMatrix.needsUpdate = true;
-    tufts.receiveShadow = true;
-    this.plaza.add(tufts);
-  }
-
-  _buildLanterns() {
-    this.lanternLights = [];
-    const postMaterial = new THREE.MeshStandardMaterial({ color: 0x2f2938, roughness: 0.8, metalness: 0.3 });
-    const glowMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(this.theme.fire) });
-    for (let i = 0; i < 4; i += 1) {
-      const angle = (i / 4) * Math.PI * 2 + Math.PI / 4;
-      const x = Math.cos(angle) * 12.5;
-      const z = Math.sin(angle) * 12.5;
-      const group = new THREE.Group();
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 2.6, 6), postMaterial);
-      post.position.y = 1.3;
-      const cage = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.42, 0.3), glowMaterial);
-      cage.position.y = 2.75;
-      const cap = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.22, 6), postMaterial);
-      cap.position.y = 3.05;
-      group.add(post, cage, cap);
-      group.position.set(x, 0, z);
-      this.scene.add(group);
-      const light = new THREE.PointLight(new THREE.Color(this.theme.fire), 9, 14, 2);
-      light.position.set(x, 2.75, z);
-      this.scene.add(light);
-      this.lanternLights.push(light);
-    }
-  }
-
-  _buildDust() {
-    const count = 260;
-    const positions = new Float32Array(count * 3);
-    for (let i = 0; i < count; i += 1) {
-      positions[i * 3] = (Math.random() - 0.5) * 46;
-      positions[i * 3 + 1] = Math.random() * 8;
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 46;
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    this.dust = new THREE.Points(
-      geometry,
-      new THREE.PointsMaterial({
-        size: 0.05,
-        color: 0xffe4b0,
-        transparent: true,
-        opacity: 0.5,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      })
-    );
-    this.scene.add(this.dust);
-  }
-
-  // ── theme ────────────────────────────────────────────────────────────
   setTheme(themeKey) {
     const theme = THEMES[themeKey] || THEMES.ember;
     this.theme = theme;
-    this.scene.background.set(theme.fog);
-    this.scene.fog.color.set(theme.fog);
-    this.fireLight.color.set(theme.fire);
-    this.lanternLights.forEach((light) => light.color.set(theme.fire));
-    this.flames.forEach((flame) => flame.material.color.set(theme.fire));
-    this.fireEmbers.material.color.set(theme.fire);
-    this.inlays.forEach((ring) => ring.material.color.set(theme.fire));
-    this.flameMaterial.color.set(theme.fire);
+    // The district keeps its dusk haze whatever room theme is selected; the
+    // theme still drives the interface and the avatar's lighting accents.
+    this.scene.background.set(0x1a2138);
+    this.scene.fog.color.set(this.hazeColor || 0x8d7a83);
   }
 
   setSettings(settings) {
@@ -562,6 +346,14 @@ export class World {
     if (this.scene.fog) {
       this.scene.fog.near = this.settings.quality === "cinematic" ? 55 : 40;
       this.scene.fog.far = this.settings.quality === "cinematic" ? 320 : 240;
+    }
+    if (this.postfx) {
+      this.postfx.enabled = settings.quality !== "low";
+      this.postfx.quality = settings.quality;
+      this.postfx.bloomStrength = settings.quality === "cinematic" ? 0.95 : 0.62;
+      this.postfx.grain = settings.quality === "cinematic" ? 0.04 : 0.022;
+      this.postfx.vignette = settings.quality === "cinematic" ? 0.7 : 0.5;
+      this.postfx.setSize(window.innerWidth, window.innerHeight, this.renderer.getPixelRatio());
     }
     this.renderer.shadowMap.enabled = Boolean(settings.shadows);
     this.sun.castShadow = Boolean(settings.shadows);
@@ -835,6 +627,31 @@ export class World {
 
   interact() {
     if (this.inVehicle) return this.exitVehicle();
+    // Indoors: the door out is the only interaction that matters.
+    if (this.region?.inside) {
+      const door = this.region.nearInteriorExit(this.position.x, this.position.z);
+      if (door) {
+        const outside = this.region.exitInterior();
+        this.position.set(outside.x, 0, outside.z);
+        this.velocity.set(0, 0, 0);
+        if (this.onNotice) this.onNotice("Back on the street", "");
+      } else if (this.onNotice) {
+        this.onNotice("The exit is by the door on the far wall", "");
+      }
+      return true;
+    }
+    const apartment = this.region?.nearInteriorEntrance(this.position.x, this.position.z);
+    if (apartment) {
+      const spawn = this.region.enterInterior();
+      if (spawn) {
+        this.position.set(spawn.x, 0, spawn.z);
+        this.velocity.set(0, 0, 0);
+        this.yaw = Math.PI;
+        this.facing = 0;
+        if (this.onNotice) this.onNotice("Apartment 4B — press E at the door to leave", "good");
+        return true;
+      }
+    }
     if (this.nearTruck()) return this.enterVehicle();
     const npc = this.region?.nearestNpc(this.position.x, this.position.z);
     if (npc && this.onNpc) {
@@ -907,16 +724,16 @@ export class World {
     const climateKey = this.region?.climateAt(this.truck.position.x, this.truck.position.z) || "temperate";
     const climate = this.worldData?.climate?.[climateKey] || { power: 1, grip: 1, fuel: 1 };
     const conditionFactor = 0.55 + 0.45 * Math.max(0, Math.min(1, vehicle.condition / 100));
-    const maxSpeed = 27 * conditionFactor * (climate.power || 1);
-    const throttle = (this.keys.has("w") || this.keys.has("arrowup") ? 1 : 0)
-      - (this.keys.has("s") || this.keys.has("arrowdown") ? 1 : 0);
-    const steer = (this.keys.has("a") || this.keys.has("arrowleft") ? 1 : 0)
-      - (this.keys.has("d") || this.keys.has("arrowright") ? 1 : 0);
-    const handbrake = this.keys.has(" ");
+    const maxSpeed = 41 * conditionFactor * (climate.power || 1);
+    const throttle = (this.pressed("w") || this.keys.has("arrowup") ? 1 : 0)
+      - (this.pressed("s") || this.keys.has("arrowdown") ? 1 : 0);
+    const steer = (this.pressed("a") || this.keys.has("arrowleft") ? 1 : 0)
+      - (this.pressed("d") || this.keys.has("arrowright") ? 1 : 0);
+    const handbrake = this.pressed(" ");
     const hasFuel = vehicle.fuel > 0.001;
 
     if (hasFuel && throttle !== 0) {
-      vehicle.speed += throttle * 7.4 * conditionFactor * (climate.power || 1) * dt;
+      vehicle.speed += throttle * 11.2 * conditionFactor * (climate.power || 1) * dt;
     }
     if (handbrake) vehicle.speed *= Math.max(0, 1 - dt * 4.2);
     const drag = 0.55 + Math.abs(vehicle.speed) * 0.025;
@@ -942,8 +759,8 @@ export class World {
       const now = performance.now();
       if (now - (this._lastBlockNotice || 0) > 2600) {
         this._lastBlockNotice = now;
-        const message = blocked === "water" ? "River — cross at the bridge"
-          : blocked === "rock" ? "Canyon wall — use the tunnel road"
+        const message = blocked === "furniture" ? "Furniture in the way"
+          : blocked === "wall" ? "That is a wall"
           : "Something solid ahead";
         if (this.onNotice) this.onNotice(message, "bad");
       }
@@ -959,7 +776,8 @@ export class World {
       }
     }
     this.truck.rotation.y = vehicle.heading;
-    spinWheels(this.truck, vehicle.speed * dt);
+    const steerVisual = Math.max(-0.5, Math.min(0.5, steer * 0.42 * Math.min(1, Math.abs(vehicle.speed) / 6)));
+    spinWheels(this.truck, vehicle.speed * dt, steerVisual);
 
     if (distance > 0) {
       const km = distance * 0.02;
@@ -981,16 +799,36 @@ export class World {
     this.vehicleSpeed = Math.abs(vehicle.speed) * 3.6;
   }
 
-  _updateVehicleCamera(dt, elapsed) {
+  dispose() {
+    this.stop();
+
+    // Telefon UI ve envanter UI temizliği
+    if (this.phoneUI) {
+      this.phoneUI.close();
+      if (this.phoneUI.panel && this.phoneUI.panel.parentNode) {
+        this.phoneUI.panel.parentNode.removeChild(this.phoneUI.panel);
+      }
+    }
+    if (this.inventoryUI) {
+      this.inventoryUI.close();
+      if (this.inventoryUI.panel && this.inventoryUI.panel.parentNode) {
+        this.inventoryUI.panel.parentNode.removeChild(this.inventoryUI.panel);
+      }
+    }
+    if (this.loadScreen?.overlay && this.loadScreen.overlay.parentNode) {
+      this.loadScreen.overlay.parentNode.removeChild(this.loadScreen.overlay);
+    }
+
+    window.removeEventListener("keydown", this._onKeyDown);
     const vehicle = this.vehicle;
     const forwardX = Math.sin(vehicle.heading);
     const forwardZ = Math.cos(vehicle.heading);
     const offset = Math.max(-1.5, Math.min(1.5, wrapAngle((this.yaw - Math.PI) - vehicle.heading)));
     const angle = vehicle.heading + offset;
-    const distance = 12.5 + Math.min(4, Math.abs(vehicle.speed) * 0.12);
+    const distance = 7.1 + Math.min(2.4, Math.abs(vehicle.speed) * 0.1);
     const targetX = this.truck.position.x - Math.sin(angle) * distance;
     const targetZ = this.truck.position.z - Math.cos(angle) * distance;
-    const targetY = 5.2 + Math.max(0, Math.min(2.4, this.pitch - 0.22) * -2.2);
+    const targetY = 3.05 + Math.max(0, Math.min(2.2, this.pitch - 0.22) * -2.0);
     const ease = Math.min(1, dt * 5.2);
     this.camera.position.x += (targetX - this.camera.position.x) * ease;
     this.camera.position.y += (targetY - this.camera.position.y) * ease;
@@ -1000,11 +838,11 @@ export class World {
       this.camera.position.y += Math.sin(elapsed * 31) * rumble;
     }
     this.camera.lookAt(
-      this.truck.position.x + forwardX * 5.5,
-      2.4,
-      this.truck.position.z + forwardZ * 5.5
+      this.truck.position.x + forwardX * 4.2,
+      1.35,
+      this.truck.position.z + forwardZ * 4.2
     );
-    const targetFov = Math.min(84, (this.settings.fov || 62) + Math.min(10, Math.abs(vehicle.speed) * 0.32));
+    const targetFov = Math.min(92, (this.settings.fov || 62) + Math.min(16, Math.abs(vehicle.speed) * 0.42));
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 4);
       this.camera.updateProjectionMatrix();
@@ -1028,6 +866,11 @@ export class World {
       pitch: Number((this.firstPerson ? this.viewPitch : (this.pitch - 0.22) * 1.2).toFixed(3)),
       anim: this.anim,
     };
+  }
+
+  /** Klavye ya da kol — biri basılıysa hareket sayılır. */
+  pressed(key) {
+    return this.keys.has(key) || (this.padKeys ? this.padKeys.has(key) : false);
   }
 
   // ── input ────────────────────────────────────────────────────────────
@@ -1054,6 +897,7 @@ export class World {
     };
     this._onBlur = () => {
       this.keys.clear();
+      this.padKeys?.clear();
       this.pointer.dragging = false;
     };
 
@@ -1166,15 +1010,70 @@ export class World {
   }
 
   // ── loop ─────────────────────────────────────────────────────────────
+  hudState() {
+    const heading = this.inVehicle ? this.vehicle.heading : this.facing;
+    const speedKmh = this.inVehicle
+      ? Math.abs(this.vehicle.speed) * 3.6
+      : Math.hypot(this.velocity.x, this.velocity.z) * 3.6;
+    const speed = Math.abs(this.vehicle.speed);
+    const gear = !this.inVehicle ? "" : speed < 0.6 ? "N" : speed < 8 ? "1" : speed < 15 ? "2" : speed < 22 ? "3" : speed < 30 ? "4" : "5";
+    const inside = Boolean(this.region?.inside);
+    return {
+      x: this.position.x, z: this.position.z, heading,
+      speedKmh, inVehicle: this.inVehicle, cash: this.vehicle.cash,
+      health: this.stats.health, armor: this.stats.armor,
+      wanted: this.fearActive ? 2 : 0, gear,
+      fuel: (this.vehicle.fuel / Math.max(1, this.vehicle.tank)) * 100,
+      area: inside ? "APARTMENT 4B" : this.areaName,
+      location: inside ? "Apartment 4B" : this.areaName,
+    };
+  }
+
   start() {
     if (this.running) return;
     this.running = true;
+    this.hud?.show();
+
+    // Load screen'ı tamamla — world hazır, UI'lar görünür
+    if (this.loadScreen && !this.loadScreen.visible) {
+      this.loadScreen.show("Dünya yükleniyor…", "Oyun içi yapılandırılıyor");
+    }
+    if (this.loadScreen) {
+      this.loadScreen.tick(0);
+      // Gerçek bir yükleme süresi yok, çünkü world zaten inşa edildi.
+      // Load screen'ı hızla tamamla.
+      this.loadScreen.complete();
+      setTimeout(() => this.loadScreen?.hide(), 350);
+    }
+
+    this.resize(this.canvas.clientWidth || window.innerWidth, this.canvas.clientHeight || window.innerHeight);
     this.clock.start();
     const tick = () => {
       if (!this.running) return;
       const dt = Math.min(0.05, this.clock.getDelta());
-      this._update(dt, this.clock.elapsedTime);
-      this.renderer.render(this.scene, this.camera);
+      // A single bad frame must never take the render loop down with it: the
+      // old loop scheduled the next frame at the very end, so one exception
+      // (mounting the truck did exactly that) froze the whole game for good.
+      try {
+        this._update(dt, this.clock.elapsedTime);
+
+        // Telefon akü ve sistem tick'i
+        if (this.phone && this.running) {
+          this.phone.tick(dt);
+          if (this.phoneUI?.visible) {
+            this.phoneUI._updateTime();
+            this.phoneUI._refreshNotifications();
+          }
+        }
+
+        if (this.postfx?.enabled) this.postfx.render(dt);
+        else this.renderer.render(this.scene, this.camera);
+      } catch (error) {
+        if (!this._loopErrorLogged) {
+          this._loopErrorLogged = true;
+          console.error("[aetherhold] frame error — the loop keeps running", error);
+        }
+      }
       this._frames += 1;
       this._fpsTime += dt;
       if (this._fpsTime >= 0.5) {
@@ -1201,9 +1100,9 @@ export class World {
       running = false;
     } else {
       // Movement.
-      const forwardInput = (this.keys.has("w") || this.keys.has("arrowup") ? 1 : 0) - (this.keys.has("s") || this.keys.has("arrowdown") ? 1 : 0);
-      const strafeInput = (this.keys.has("d") || this.keys.has("arrowright") ? 1 : 0) - (this.keys.has("a") || this.keys.has("arrowleft") ? 1 : 0);
-      running = this.keys.has("shift");
+      const forwardInput = (this.pressed("w") || this.keys.has("arrowup") ? 1 : 0) - (this.pressed("s") || this.keys.has("arrowdown") ? 1 : 0);
+      const strafeInput = (this.pressed("d") || this.keys.has("arrowright") ? 1 : 0) - (this.pressed("a") || this.keys.has("arrowleft") ? 1 : 0);
+      running = this.pressed("shift");
       const speed = running ? RUN_SPEED : WALK_SPEED;
 
       const forwardX = -Math.sin(this.yaw);
@@ -1233,16 +1132,13 @@ export class World {
       this.position.x += this.velocity.x * dt;
       this.position.z += this.velocity.z * dt;
 
-      const radius = Math.hypot(this.position.x, this.position.z);
-      if (radius > 214) {
-        const scale = 214 / radius;
-        this.position.x *= scale;
-        this.position.z *= scale;
-      }
-      if (radius < FIRE_CLEARANCE) {
-        const scale = FIRE_CLEARANCE / Math.max(0.0001, radius);
-        this.position.x *= scale;
-        this.position.z *= scale;
+      if (!this.region?.inside) {
+        const radius = Math.hypot(this.position.x, this.position.z);
+        if (radius > 200) {
+          const scale = 200 / radius;
+          this.position.x *= scale;
+          this.position.z *= scale;
+        }
       }
       this._resolveCollision(previousX, previousZ, false);
     }
@@ -1261,39 +1157,42 @@ export class World {
     this.bobPhase += dt * (running ? 11.5 : 7.6) * (speedNow > 0.25 ? 1 : 0);
     this._updateCamera(dt, elapsed, speedNow, running);
 
-    // Fire.
-    const flicker = 0.82 + Math.sin(elapsed * 9.3) * 0.09 + Math.sin(elapsed * 23.7) * 0.05;
-    this.fireLight.intensity = 38 * flicker;
-    this.flames.forEach((flame, index) => {
-      const wobble = 1 + Math.sin(elapsed * (7 + index * 2) + index) * 0.09;
-      flame.scale.set(wobble, 1 + Math.sin(elapsed * (5 + index) + index * 2) * 0.15, wobble);
-      flame.rotation.y += dt * (0.6 + index * 0.4);
-      flame.material.opacity = 0.55 + Math.sin(elapsed * (6 + index)) * 0.16;
-    });
-    this.lanternLights.forEach((light, index) => {
-      light.intensity = 8.5 + Math.sin(elapsed * (3 + index) + index * 1.7) * 1.4;
-    });
-
-    const emberPositions = this.fireEmbers.geometry.attributes.position.array;
-    for (let i = 0; i < this.fireEmberSpeeds.length; i += 1) {
-      emberPositions[i * 3 + 1] += dt * this.fireEmberSpeeds[i];
-      emberPositions[i * 3] += Math.sin(elapsed * 2 + i) * dt * 0.16;
-      if (emberPositions[i * 3 + 1] > 3.4) {
-        emberPositions[i * 3 + 1] = 0.2;
-        emberPositions[i * 3] = (Math.random() - 0.5) * 0.8;
-        emberPositions[i * 3 + 2] = (Math.random() - 0.5) * 0.8;
-      }
-    }
-    this.fireEmbers.geometry.attributes.position.needsUpdate = true;
-
-    this.dust.rotation.y += dt * 0.012;
-
     this._animateAvatars(dt, elapsed);
 
     this._hudTimer += dt;
     if (this._hudTimer >= 0.2) {
       this._hudTimer = 0;
       this.emitVehicleState();
+    }
+
+    // Load screen animasyonu (kendi kendine tamamlanır)
+    if (this.loadScreen && this.loadScreen.visible) {
+      this.loadScreen.tick(dt);
+      if (this.loadScreen.elapsed >= 1.4) {
+        this.loadScreen.hide();
+      }
+    }
+
+    // Street name for the radar banner, refreshed while walking the district.
+
+    // Telefon akü ve sistem tick'i
+    if (this.phone && this.running) {
+      this.phone.tick(dt);
+      if (this.phoneUI?.visible) {
+        this.phoneUI._updateTime();
+        this.phoneUI._refreshNotifications();
+      }
+    }
+    if (!this.region?.inside) {
+      const streets = this.region?.radarData?.()?.streets;
+      if (Math.abs(this.position.z) < 20) this.areaName = streets ? streets.avenue : "VINEWOOD";
+      else if (Math.abs(this.position.x) < 20) this.areaName = "DOWNTOWN";
+      else this.areaName = this.region?.nearestSite(this.position.x, this.position.z, 46)?.label || "ELGIN DISTRICT";
+    }
+    this._hudFrame = (this._hudFrame || 0) + dt;
+    if (this._hudFrame >= 0.033) {
+      this.hud?.update(this.hudState(), this._hudFrame);
+      this._hudFrame = 0;
     }
   }
 
@@ -1326,10 +1225,11 @@ export class World {
     const cosPitch = Math.cos(this.pitch);
     const rightX = Math.cos(this.yaw);
     const rightZ = -Math.sin(this.yaw);
-    const shoulder = 0.6;
+    const shoulder = this.region?.inside ? 0.15 : 0.6;
     // The camera is over the right shoulder, so the avatar never hides the scene.
-    const targetX = this.position.x + Math.sin(this.yaw) * cosPitch * this.distance + rightX * shoulder;
-    const targetZ = this.position.z + Math.cos(this.yaw) * cosPitch * this.distance + rightZ * shoulder;
+    const cameraDistance = this.region?.inside ? 2.5 : this.distance;
+    const targetX = this.position.x + Math.sin(this.yaw) * cosPitch * cameraDistance + rightX * shoulder;
+    const targetZ = this.position.z + Math.cos(this.yaw) * cosPitch * cameraDistance + rightZ * shoulder;
     const targetY = Math.max(0.45, focusY + 0.42 + Math.sin(this.pitch) * this.distance);
     const ease = Math.min(1, dt * 8.5);
     const fearShake = this.fearActive && this.settings.shake ? 0.012 : 0;
@@ -1351,6 +1251,63 @@ export class World {
     const targetFov = this.settings.fov;
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 5);
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
+  // Chase camera for the truck. `_updateCamera` delegates here while seated, so
+  // it must always place the camera: this method was missing, which threw a
+  // TypeError on the first mounted frame and left the player looking at a
+  // frozen picture.
+  _updateVehicleCamera(dt, elapsed) {
+    const truck = this.truck;
+    if (!truck) return;
+    const heading = this.vehicle?.heading ?? truck.rotation.y ?? 0;
+    const forwardX = Math.sin(heading);
+    const forwardZ = Math.cos(heading);
+    const speed = Math.abs(this.vehicle?.speed || 0);
+    const cab = this.firstPerson;
+
+    if (cab) {
+      // In the cab the eye sits above the seat, looking down the bonnet.
+      const eyeX = truck.position.x + forwardX * 0.6;
+      const eyeZ = truck.position.z + forwardZ * 0.6;
+      const ease = Math.min(1, dt * 14);
+      this.camera.position.x += (eyeX - this.camera.position.x) * ease;
+      this.camera.position.y += (2.02 - this.camera.position.y) * ease;
+      this.camera.position.z += (eyeZ - this.camera.position.z) * ease;
+      this.camera.lookAt(
+        truck.position.x + forwardX * 16,
+        1.7 - Math.sin(this.pitch || 0) * 8,
+        truck.position.z + forwardZ * 16
+      );
+    } else {
+      // Behind the cab and above the bed; the rig lags so turns read as weight.
+      const back = 8.6 + Math.min(2.6, speed * 0.22);
+      const high = 4.2 + Math.min(0.8, speed * 0.06);
+      const targetX = truck.position.x - forwardX * back;
+      const targetZ = truck.position.z - forwardZ * back;
+      const ease = Math.min(1, dt * 4.6);
+      this.camera.position.x += (targetX - this.camera.position.x) * ease;
+      this.camera.position.y += (high - this.camera.position.y) * ease;
+      this.camera.position.z += (targetZ - this.camera.position.z) * ease;
+      this.camera.lookAt(
+        truck.position.x + forwardX * 7.5,
+        1.55,
+        truck.position.z + forwardZ * 7.5
+      );
+    }
+
+    // Engine shake, only when the player allows it.
+    if (this.settings.shake && speed > 0.4) {
+      const amp = Math.min(0.04, speed * 0.005);
+      this.camera.position.y += Math.sin(elapsed * 22.5) * amp;
+      this.camera.position.x += Math.cos(elapsed * 17.3) * amp * 0.5;
+    }
+
+    const targetFov = this.settings.fov + (cab ? 2 : 6) + Math.min(9, speed * 0.55);
+    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 4);
       this.camera.updateProjectionMatrix();
     }
   }
@@ -1430,6 +1387,13 @@ export class World {
   }
 
   resize(width, height) {
+    // Load screen boyutlarını yeniden hesapla
+    if (this.loadScreen?.overlay) {
+      const card = this.loadScreen.overlay.querySelector(".load-card");
+      if (card) {
+        card.style.width = `${Math.min(380, window.innerWidth - 40)}px`;
+      }
+    }
     const scale = Math.max(0.5, Math.min(1.6, this.settings.scale / 100));
     const maxRatio = this.settings.quality === "cinematic" ? 2.5
       : this.settings.quality === "ultra" ? 2.25
@@ -1440,12 +1404,31 @@ export class World {
     const ratio = Math.min((window.devicePixelRatio || 1) * scale, maxRatio);
     this.renderer.setPixelRatio(Math.max(0.6, ratio));
     this.renderer.setSize(width, height, false);
+    this.postfx?.setSize(width, height, this.renderer.getPixelRatio());
     this.camera.aspect = width / Math.max(1, height);
     this.camera.updateProjectionMatrix();
   }
 
   dispose() {
     this.stop();
+
+    // Telefon UI ve envanter UI temizliği
+    if (this.phoneUI) {
+      this.phoneUI.close();
+      if (this.phoneUI.panel && this.phoneUI.panel.parentNode) {
+        this.phoneUI.panel.parentNode.removeChild(this.phoneUI.panel);
+      }
+    }
+    if (this.inventoryUI) {
+      this.inventoryUI.close();
+      if (this.inventoryUI.panel && this.inventoryUI.panel.parentNode) {
+        this.inventoryUI.panel.parentNode.removeChild(this.inventoryUI.panel);
+      }
+    }
+    if (this.loadScreen?.overlay && this.loadScreen.overlay.parentNode) {
+      this.loadScreen.overlay.parentNode.removeChild(this.loadScreen.overlay);
+    }
+
     window.removeEventListener("keydown", this._onKeyDown);
     window.removeEventListener("keyup", this._onKeyUp);
     window.removeEventListener("blur", this._onBlur);
@@ -1458,6 +1441,12 @@ export class World {
     this.releaseLook();
     this.players.forEach((record) => this._removeRecord(record));
     this.players.clear();
+    this.postfx?.dispose();
+    this.postfx = null;
+    this.hud?.destroy();
+    this.hud = null;
+    this.region?.disposes?.();
+    kitMaterials().disposeAll();
     this._disposables.forEach((item) => item?.dispose?.());
     this.renderer.dispose();
   }

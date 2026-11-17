@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="Aetherhold logo">
+  <title>Aetherhold</title>
+  <defs>
+    <linearGradient id="holdSky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1730"/>
+      <stop offset="1" stop-color="#07070d"/>
+    </linearGradient>
+    <linearGradient id="ember" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f9d479"/>
+      <stop offset="1" stop-color="#f4893f"/>
+    </linearGradient>
+    <radialGradient id="emberGlow" cx="50%" cy="38%" r="70%">
+      <stop offset="0" stop-color="#f4c46b" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#f4c46b" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0" y="0" width="200" height="200" rx="28" fill="url(#holdSky)"/>
+  <rect x="6" y="6" width="188" height="188" rx="24" fill="none" stroke="#f4c46b" stroke-opacity="0.18" stroke-width="2"/>
+
+  <circle cx="100" cy="78" r="92" fill="url(#emberGlow)" class="aether-hold-glow"/>
+  <circle cx="100" cy="78" r="58" fill="none" stroke="#f4c46b" stroke-opacity="0.18" stroke-width="2" class="aether-hold-ring"/>
+
+  <g class="aether-hold-star">
+    <path d="M100 24l9.1 25.3 25.3 9.1-25.3 9.1-9.1 25.3-9.1-25.3-25.3-9.1 25.3-9.1z" fill="url(#ember)"/>
+    <circle cx="100" cy="76" r="11" fill="#07070d"/>
+    <circle cx="100" cy="76" r="6.4" fill="url(#ember)"/>
+  </g>
+
+  <text x="100" y="148" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" font-weight="700" letter-spacing="0.14em" font-size="22" fill="#f4efe2">AETHERHOLD</text>
+  <text x="100" y="172" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif" letter-spacing="0.32em" font-size="9" fill="#f4c46b" text-transform="uppercase">WANDERER’S ROAD</text>
+
+  <style>
+    .aether-hold-glow { animation: aether-hold-pulse 4s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
+    .aether-hold-ring { animation: aether-hold-spin 18s linear infinite; transform-origin: center; transform-box: fill-box; }
+    .aether-hold-star { animation: aether-hold-star 6s ease-in-out infinite; transform-origin: 100px 76px; transform-box: fill-box; }
+
+    @keyframes aether-hold-pulse {
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 0.95; }
+    }
+    @keyframes aether-hold-spin {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes aether-hold-star {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.06); }
+    }
+
+    text { user-select: none; }
+  </style>
+</svg>

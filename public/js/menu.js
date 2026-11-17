@@ -464,7 +464,7 @@ export class MenuUI {
     this._bindSlider("set-ambience", "ambience", (v) => `${v}%`);
     this._bindSlider("set-music", "music", (v) => `${v}%`);
     this._bindSlider("set-sens", "sensitivity", (v) => `${(v / 100).toFixed(1)}×`);
-    ["set-nameplates:nameplates", "set-shadows:shadows", "set-shake:shake", "set-sfx:sfx"].forEach((pair) => {
+    ["set-nameplates:nameplates", "set-shadows:shadows", "set-shake:shake", "set-sfx:sfx", "set-tv:tv"].forEach((pair) => {
       const [id, key] = pair.split(":");
       const input = $(id);
       input?.addEventListener("change", () => {
@@ -529,7 +529,10 @@ export class MenuUI {
       "set-shadows": settings.shadows,
       "set-shake": settings.shake,
       "set-sfx": settings.sfx,
+      "set-tv": settings.tv,
     };
+    // TV mode is one class on <body>; the stylesheet does the rest.
+    document.body.classList.toggle("tv-mode", Boolean(settings.tv));
     Object.entries(checks).forEach(([id, value]) => {
       const input = $(id);
       if (input) input.checked = Boolean(value);

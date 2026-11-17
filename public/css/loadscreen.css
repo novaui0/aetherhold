@@ -1,0 +1,54 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Loading screen — shown between menu and world entry.
+   Separate file so world.js can import it without pulling in the full style.css.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.loading-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(7, 7, 13, 0.92);
+  backdrop-filter: blur(6px);
+  opacity: 1;
+  transition: opacity 0.35s ease, visibility 0.35s ease;
+}
+
+.loading-screen.hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.loading-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.loading-spinner {
+  width: 54px;
+  height: 54px;
+  border: 3px solid rgba(244, 196, 107, 0.15);
+  border-top-color: #f4c46b;
+  border-radius: 50%;
+  animation: lsSpin 0.9s linear infinite;
+}
+
+@keyframes lsSpin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-text {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #f4efe2;
+}
+
+/* The paragraph inside is targeted via id in index.html anyway */
+#loading-text { margin: 0; font-size: 14px; letter-spacing: 0.18em; text-transform: uppercase; color: #f4efe2; }

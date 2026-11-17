@@ -864,6 +864,52 @@ input[type="range"]::-moz-range-thumb {
 @keyframes bootSlide { from { transform: translateX(-100%); } to { transform: translateX(320%); } }
 .boot p { margin: 0; font-size: 10px; letter-spacing: 0.34em; text-transform: uppercase; color: var(--muted); }
 
+.loading-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9998;
+  background: rgba(10, 10, 18, 0.7);
+  backdrop-filter: blur(4px);
+  transition: opacity 0.4s ease, visibility 0.4s ease;
+}
+
+.loading-screen.hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.loading-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.loading-spinner {
+  width: 48px;
+  height: 48px;
+  border: 3px solid rgba(242, 201, 125, 0.1);
+  border-top-color: var(--gold);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-screen p {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 /* ── Responsive ────────────────────────────────────────────────────────── */
 @media (max-width: 1120px) {
   .enter-grid, .host-grid, .settings-grid, .credits-grid { grid-template-columns: 1fr; }
@@ -1237,6 +1283,170 @@ input[type="number"] { max-width: 120px; }
   #game.cinematic::before { animation: none; }
 }
 
+/* ══ Phone, Inventory & Load screen ═════════════════════════════════════════ */
+.phone-panel {
+  position: absolute; right: 24px; bottom: 24px; width: 340px; max-width: calc(100vw - 48px);
+  border-radius: 22px; overflow: hidden;
+  border: 1px solid rgba(242,201,125,0.28);
+  background: linear-gradient(165deg, rgba(14,14,26,0.97), rgba(6,6,12,0.98));
+  box-shadow: 0 30px 70px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.05);
+  backdrop-filter: blur(14px);
+  z-index: 300; pointer-events: auto;
+  opacity: 0; transform: scale(0.96) translateY(8px);
+  transition: opacity 0.26s ease, transform 0.26s cubic-bezier(0.2,0.85,0.3,1);
+}
+.phone-panel:not(.phone-hidden) { opacity: 1; transform: none; }
+.phone-panel.phone-hidden { display: none; }
+.phone-screen { display: flex; flex-direction: column; min-height: 480px; height: min(640px, 88vh); }
+.phone-notch { height: 22px; background: rgba(0,0,0,0.35); border-bottom: 1px solid rgba(242,201,125,0.14); }
+.phone-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid rgba(242,201,125,0.1);
+  background: rgba(0,0,0,0.25);
+}
+.phone-time {
+  font-size: 13px; letter-spacing: 0.06em; font-weight: 600; color: #fff4dd;
+  font-variant-numeric: tabular-nums;
+}
+.phone-close {
+  width: 26px; height: 26px; padding: 0; border-radius: 7px; border: 1px solid rgba(242,201,125,0.2);
+  background: rgba(255,255,255,0.04); color: var(--muted); font-size: 15px; line-height: 1;
+}
+.phone-close:hover { color: var(--gold); border-color: rgba(242,201,125,0.4); }
+.phone-apps {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+  padding: 12px 10px; border-bottom: 1px solid rgba(242,201,125,0.1);
+}
+.phone-app-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 8px 4px; border: 1px solid rgba(242,201,125,0.12); border-radius: 10px;
+  background: rgba(255,255,255,0.03); color: var(--muted); cursor: pointer;
+  transition: all 0.16s ease;
+}
+.phone-app-btn:hover { border-color: rgba(242,201,125,0.4); color: #fff4dd; background: rgba(242,201,125,0.1); }
+.phone-app-btn.active { border-color: rgba(242,201,125,0.5); background: rgba(242,201,125,0.14); color: var(--gold); }
+.phone-app-icon { font-size: 22px; line-height: 1; }
+.phone-app-label { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; }
+.phone-content {
+  flex: 1 1 auto; padding: 14px; overflow-y: auto; min-height: 0;
+}
+.phone-content[data-app-area] { display: block; }
+.phone-empty {
+  display: grid; place-items: center; height: 100%; color: var(--muted);
+  font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+}
+.phone-notifications {
+  border-top: 1px solid rgba(242,201,125,0.12); padding: 10px; max-height: 120px; overflow-y: auto;
+}
+.phone-notif { padding: 7px 8px; border-radius: 8px; background: rgba(255,255,255,0.03); margin-bottom: 5px; }
+.phone-notif-title { font-size: 11px; font-weight: 600; color: #fff4dd; letter-spacing: 0.02em; }
+.phone-notif-body { font-size: 10.5px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+.phone-notif.kind-item { border-left: 2px solid var(--gold); }
+.phone-notif.kind-call { border-left: 2px solid var(--arc); }
+.phone-notif.kind-message { border-left: 2px solid var(--rose); }
+
+/* ── Inventory panel ── */
+.inv-panel {
+  position: absolute; right: 24px; bottom: 24px; width: 320px; max-width: calc(100vw - 48px);
+  border-radius: 20px; overflow: hidden;
+  border: 1px solid rgba(242,201,125,0.28);
+  background: linear-gradient(165deg, rgba(14,14,26,0.97), rgba(6,6,12,0.98));
+  box-shadow: 0 30px 70px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.05);
+  backdrop-filter: blur(14px);
+  z-index: 300; pointer-events: auto;
+  opacity: 0; transform: scale(0.96) translateY(8px);
+  transition: opacity 0.26s ease, transform 0.26s cubic-bezier(0.2,0.85,0.3,1);
+}
+.inv-panel:not(.inv-hidden) { opacity: 1; transform: none; }
+.inv-panel.inv-hidden { display: none; }
+.inv-header {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid rgba(242,201,125,0.12); background: rgba(0,0,0,0.25);
+}
+.inv-title { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; color: #fff4dd; }
+.inv-count { font-size: 10px; letter-spacing: 0.08em; color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+.inv-close {
+  width: 24px; height: 24px; padding: 0; border-radius: 6px; border: 1px solid rgba(242,201,125,0.2);
+  background: rgba(255,255,255,0.04); color: var(--muted); font-size: 14px; line-height: 1;
+}
+.inv-close:hover { color: var(--gold); border-color: rgba(242,201,125,0.4); }
+.inv-tabs {
+  display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid rgba(242,201,125,0.08);
+  overflow-x: auto; scrollbar-width: thin;
+}
+.inv-tab {
+  flex: 0 0 auto; padding: 5px 9px; border: 1px solid rgba(242,201,125,0.12); border-radius: 8px;
+  background: rgba(255,255,255,0.02); color: var(--muted); cursor: pointer;
+  font-size: 13px; transition: all 0.16s ease;
+}
+.inv-tab:hover { color: #fff4dd; border-color: rgba(242,201,125,0.35); }
+.inv-tab.active { background: rgba(242,201,125,0.14); color: var(--gold); border-color: rgba(242,201,125,0.45); }
+.inv-grid {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 10px;
+  overflow-y: auto; min-height: 120px;
+}
+.inv-card {
+  display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px;
+  border: 1px solid rgba(242,201,125,0.12); border-radius: 9px;
+  background: rgba(255,255,255,0.03); cursor: pointer; transition: all 0.16s ease;
+}
+.inv-card:hover { border-color: rgba(242,201,125,0.4); background: rgba(242,201,125,0.08); transform: translateY(-2px); }
+.inv-card.selected { border-color: var(--gold); background: rgba(242,201,125,0.16); box-shadow: 0 0 14px rgba(242,201,125,0.2); }
+.inv-card-icon { font-size: 26px; line-height: 1; }
+.inv-card-name { font-size: 9px; letter-spacing: 0.04em; color: #fff4dd; text-align: center; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.inv-card-meta { font-size: 8px; color: var(--muted); letter-spacing: 0.04em; }
+.inv-empty { display: grid; place-items: center; grid-column: 1 / -1; color: var(--muted); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.inv-detail {
+  padding: 10px 12px; border-top: 1px solid rgba(242,201,125,0.1); min-height: 70px;
+}
+.inv-detail-inner { display: flex; gap: 10px; align-items: flex-start; }
+.inv-detail-icon { font-size: 32px; line-height: 1; flex: 0 0 auto; }
+.inv-detail-info { flex: 1 1 auto; min-width: 0; }
+.inv-detail-name { font-size: 12px; font-weight: 600; color: #fff4dd; letter-spacing: 0.02em; }
+.inv-detail-desc { font-size: 10.5px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+.inv-detail-stats { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 5px 10px; font-size: 9.5px; color: var(--muted); letter-spacing: 0.04em; }
+.inv-footer {
+  display: flex; gap: 7px; padding: 9px 12px; border-top: 1px solid rgba(242,201,125,0.08);
+}
+.inv-footer .btn {
+  flex: 1 1 0; border-radius: 8px; padding: 8px 10px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+}
+.inv-footer .btn:not(.ghost) { background: rgba(242,201,125,0.14); border-color: rgba(242,201,125,0.3); color: var(--gold); }
+.inv-footer .btn:not(.ghost):hover { background: rgba(242,201,125,0.24); }
+.inv-footer .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Load screen overlay ── */
+.load-overlay {
+  position: fixed; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(circle at 50% 40%, rgba(20,16,31,0.95), rgba(4,4,10,0.99));
+  backdrop-filter: blur(6px);
+  opacity: 0; visibility: hidden;
+  transition: opacity 0.4s ease, visibility 0.4s ease;
+}
+.load-overlay:not(.load-hidden) { opacity: 1; visibility: visible; }
+.load-card {
+  width: min(380px, 92vw); padding: 28px 30px; border-radius: 18px;
+  border: 1px solid rgba(242,201,125,0.28);
+  background: linear-gradient(165deg, rgba(22,20,34,0.98), rgba(8,8,16,0.99));
+  box-shadow: 0 40px 90px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.05);
+  text-align: center;
+}
+.load-spinner {
+  width: 46px; height: 46px; margin: 0 auto 14px; border-radius: 50%;
+  border: 3px solid rgba(242,201,125,0.15); border-top-color: var(--gold);
+  animation: spin 1s linear infinite; box-shadow: 0 0 20px rgba(242,201,125,0.15);
+}
+.load-bar-track {
+  width: 100%; height: 4px; background: rgba(242,201,125,0.12); border-radius: 4px; overflow: hidden;
+  margin: 0 auto 12px;
+}
+.load-bar-fill {
+  height: 100%; width: 0%; background: linear-gradient(90deg, var(--gold-deep), var(--gold));
+  transition: width 0.1s linear; box-shadow: 0 0 10px rgba(242,201,125,0.3);
+}
+.load-text { font-family: var(--font-display); font-size: 13px; letter-spacing: 0.22em; text-transform: uppercase; color: #fff4dd; margin-bottom: 4px; }
+.load-sub { font-size: 10.5px; letter-spacing: 0.08em; color: var(--muted); }
+
 /* ══ Action bar, TAB list and chest GUI ══════════════════════════════════ */
 .action-bar {
   position: absolute; left: 50%; top: 78px; transform: translateX(-50%);
@@ -1320,3 +1530,154 @@ input[type="number"] { max-width: 120px; }
 }
 .chat-cmd:hover { background: rgba(242, 201, 125, 0.28); }
 @media (max-width: 720px) { .action-bar { top: 70px; font-size: 9px; padding: 4px 10px; } .chest-grid { grid-template-columns: repeat(6, 1fr); } }
+
+/* ══════════════════════ GTA-STYLE HUD ══════════════════════ */
+.gta-hud {
+  position: fixed; inset: 0; z-index: 40; pointer-events: none;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  color: #f4f1e6; opacity: 0; transition: opacity 0.4s ease;
+}
+.gta-hud.live { opacity: 1; }
+.gta-hud .gta-topbar {
+  position: absolute; top: 18px; right: 22px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+}
+.gta-wanted { display: flex; gap: 3px; height: 20px; }
+.gta-star {
+  font-size: 18px; line-height: 1; color: rgba(255, 255, 255, 0.16);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); transition: color 0.25s ease, transform 0.25s ease;
+}
+.gta-star.on { color: #ffd75e; transform: scale(1.06); text-shadow: 0 0 12px rgba(255, 200, 80, 0.85); }
+.gta-money {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 4px 12px 5px; border-radius: 3px;
+  background: linear-gradient(180deg, rgba(10, 14, 20, 0.82), rgba(6, 9, 13, 0.7));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+}
+.gta-cash {
+  font-size: 26px; font-weight: 700; letter-spacing: 0.02em; color: #9be7a8;
+  font-variant-numeric: tabular-nums; text-shadow: 0 0 18px rgba(120, 240, 150, 0.35);
+}
+.gta-area {
+  position: absolute; top: 74px; left: 50%; transform: translateX(-50%);
+  font-size: 13px; letter-spacing: 0.34em; text-transform: uppercase;
+  color: rgba(244, 241, 230, 0.9); opacity: 0; transition: opacity 0.5s ease;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.9);
+}
+.gta-area.show { opacity: 1; }
+.gta-left {
+  position: absolute; left: 22px; bottom: 22px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+}
+.gta-bars { display: flex; flex-direction: column; gap: 4px; margin-left: 8px; }
+.gta-bar {
+  width: 150px; height: 9px; border-radius: 2px; overflow: hidden;
+  background: rgba(6, 10, 12, 0.78); border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.gta-bar i {
+  display: block; height: 100%; width: 100%;
+  transition: width 0.28s cubic-bezier(0.3, 0.9, 0.3, 1);
+}
+.gta-health i { background: linear-gradient(90deg, #48b96a, #8ee6a0); }
+.gta-armor i { background: linear-gradient(90deg, #3d7fc4, #86c7ff); }
+.gta-armor { height: 6px; opacity: 0.9; }
+.gta-radar-wrap {
+  position: relative; width: 188px; height: 188px;
+  filter: drop-shadow(0 10px 26px rgba(0, 0, 0, 0.65));
+}
+.gta-radar-wrap canvas { width: 100%; height: 100%; display: block; }
+.gta-north {
+  position: absolute; top: 8px; left: 50%; transform-origin: 50% 86px;
+  font-size: 9px; letter-spacing: 0.1em; color: rgba(255, 236, 190, 0.9);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9); display: none;
+}
+.gta-vehicle {
+  position: absolute; right: 20px; bottom: 22px; width: 178px;
+  display: grid; place-items: center; opacity: 0; transform: translateY(8px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.gta-vehicle.on { opacity: 1; transform: translateY(0); }
+.gta-vehicle canvas { width: 178px; height: 178px; }
+.gta-speed-text {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -18%);
+  text-align: center; line-height: 1; pointer-events: none;
+}
+.gta-speed-text b {
+  display: block; font-size: 34px; font-weight: 700; letter-spacing: -0.02em;
+  color: #fff6e2; font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 20px rgba(255, 200, 120, 0.4);
+}
+.gta-speed-text span { font-size: 8px; letter-spacing: 0.22em; color: rgba(244, 241, 230, 0.6); }
+.gta-gear {
+  position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%);
+  font-size: 12px; letter-spacing: 0.2em; color: #ffd75e;
+}
+.gta-fuel {
+  position: absolute; bottom: 8px; left: 22px; right: 22px; height: 4px;
+  background: rgba(8, 12, 14, 0.8); border-radius: 2px; overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.gta-fuel i { display: block; height: 100%; background: linear-gradient(90deg, #ffb347, #ffe08a); }
+.gta-hintline {
+  position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%);
+  font-size: 10px; letter-spacing: 0.24em; text-transform: uppercase;
+  color: rgba(244, 241, 230, 0.62); text-shadow: 0 2px 10px rgba(0, 0, 0, 0.9);
+  max-width: 46vw; text-align: center;
+}
+@media (max-width: 900px) {
+  .gta-radar-wrap { width: 132px; height: 132px; }
+  .gta-vehicle { width: 132px; }
+  .gta-vehicle canvas { width: 132px; height: 132px; }
+  .gta-cash { font-size: 20px; }
+  .gta-hintline { display: none; }
+}
+
+/* ══ TV / couch mode ═══════════════════════════════════════════════════════
+   A sofa is two metres from the screen and the player is holding a pad, so
+   everything the HUD whispers is turned up: bigger type, taller hit areas and
+   stronger contrast. Toggled with T, the pad's Share button, or Settings.
+   ═══════════════════════════════════════════════════════════════════════ */
+body.tv-mode .chat { width: min(560px, 52vw); }
+body.tv-mode .chat-log { max-height: 36vh; }
+/* The size lives on .chat-line, so it has to be raised there, not on the log. */
+body.tv-mode .chat-line { font-size: 16px; line-height: 1.5; padding: 9px 13px; }
+body.tv-mode .chat-line time,
+body.tv-mode .chat-line .tag { font-size: 11.5px; }
+body.tv-mode .chat-head,
+body.tv-mode .chat-hint,
+body.tv-mode .chat-prompt { font-size: 13px; }
+body.tv-mode .chat-input-row input { font-size: 16px; padding: 12px 14px; }
+body.tv-mode .chat-compose .btn,
+body.tv-mode .chat-quick .btn,
+body.tv-mode .chat-tabs button { font-size: 13px; min-height: 40px; padding: 8px 14px; }
+
+body.tv-mode .action-bar { font-size: 13px; padding: 8px 18px; top: 92px; }
+body.tv-mode .hud-hint { font-size: 13.5px; }
+body.tv-mode .hud-top-bar { font-size: 14px; }
+body.tv-mode .hud-score { font-size: 1.16em; }
+body.tv-mode .hud-center .hud-title,
+body.tv-mode .hud-center h2 { font-size: 2.1em; }
+body.tv-mode .vehicle-hud { font-size: 1.14em; }
+body.tv-mode .hud-tools .hud-btn,
+body.tv-mode .hud-tools button { min-width: 40px; min-height: 40px; }
+
+body.tv-mode .rail-btn { padding: 14px 16px; }
+body.tv-mode .rail-btn span { font-size: 15px; }
+body.tv-mode .rail-btn em { font-size: 11.5px; }
+body.tv-mode .cta { padding: 20px 24px; }
+body.tv-mode .cta-label { font-size: 17px; letter-spacing: 0.16em; }
+body.tv-mode .room-row { padding: 14px 16px; }
+body.tv-mode .room-row strong { font-size: 15px; }
+body.tv-mode .room-row em { font-size: 12px; }
+body.tv-mode .panel-head h2 { font-size: 1.35em; }
+body.tv-mode .panel-head p { font-size: 14px; }
+body.tv-mode .btn { min-height: 44px; font-size: 13.5px; }
+
+/* Big screens: give the chat a little more room and stop the overlays from
+   hugging the edges of a 65-inch panel. */
+@media (min-width: 1600px) {
+  body.tv-mode .chat { max-width: 720px; }
+  body.tv-mode .hud-hint { bottom: 26px; }
+}

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Aetherhold mark">
+  <title>Aetherhold mark</title>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1733"/>
+      <stop offset="1" stop-color="#07070d"/>
+    </linearGradient>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe1a0"/>
+      <stop offset="0.55" stop-color="#f4c46b"/>
+      <stop offset="1" stop-color="#e8863c"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="50%" cy="46%" r="52%">
+      <stop offset="0" stop-color="#f4c46b" stop-opacity="0.5"/>
+      <stop offset="0.55" stop-color="#f4c46b" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#f4c46b" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="4" y="4" width="248" height="248" rx="56" fill="url(#sky)"/>
+  <rect x="4" y="4" width="248" height="248" rx="56" fill="url(#halo)"/>
+  <rect x="10" y="10" width="236" height="236" rx="50" fill="none" stroke="#f4c46b" stroke-opacity="0.32" stroke-width="3"/>
+
+  <!-- outer hold ring -->
+  <circle cx="128" cy="128" r="88" fill="none" stroke="#f4c46b" stroke-opacity="0.22" stroke-width="3"/>
+  <circle cx="128" cy="128" r="88" fill="none" stroke="#f4c46b" stroke-opacity="0.55" stroke-width="3"
+          stroke-dasharray="26 18" stroke-linecap="round"/>
+
+  <!-- compass ticks -->
+  <g stroke="#f4c46b" stroke-opacity="0.45" stroke-width="4" stroke-linecap="round">
+    <path d="M128 26v14"/><path d="M128 216v14"/>
+    <path d="M26 128h14"/><path d="M216 128h14"/>
+  </g>
+
+  <!-- four-point star / flame of the hold -->
+  <path d="M128 52l15.5 44.5L188 112l-44.5 15.5L128 172l-15.5-44.5L68 112l44.5-15.5z"
+        fill="url(#ember)"/>
+  <circle cx="128" cy="112" r="19" fill="#0a0a14" fill-opacity="0.92"/>
+  <circle cx="128" cy="112" r="11" fill="url(#ember)"/>
+  <circle cx="128" cy="112" r="4.5" fill="#fff6e2"/>
+
+  <!-- little embers -->
+  <circle cx="180" cy="72" r="4" fill="#f4c46b" fill-opacity="0.75"/>
+  <circle cx="76" cy="164" r="3" fill="#f4c46b" fill-opacity="0.6"/>
+  <circle cx="172" cy="178" r="2.5" fill="#f4c46b" fill-opacity="0.5"/>
+</svg>

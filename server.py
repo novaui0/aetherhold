@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import importlib.util
+import ipaddress
 import json
 import math
 import mimetypes
@@ -1698,6 +1699,15 @@ def admin_state() -> dict:
     }
 
 
+def _is_private_address(value: str) -> bool:
+    """True for loopback / LAN / link-local peers — i.e. a local proxy."""
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
 # --------------------------------------------------------------------------- #
 # HTTP plumbing
 # --------------------------------------------------------------------------- #
@@ -1719,7 +1729,21 @@ class Handler(BaseHTTPRequestHandler):
 
     @property
     def client_ip(self) -> str:
-        return self.client_address[0] if self.client_address else "?"
+        """The player's real address, even behind a reverse proxy.
+
+        Render, Northflank, Railway and Docker front the process with a private
+        load balancer, so the socket peer is the proxy and every player would
+        look identical (one ban would bar the whole hall). When the peer is a
+        private or loopback address we take the first hop of X-Forwarded-For;
+        a direct public peer cannot spoof it because the header is ignored.
+        """
+        peer = self.client_address[0] if self.client_address else "?"
+        forwarded = self.headers.get("X-Forwarded-For") if self.headers else None
+        if forwarded and _is_private_address(peer):
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first
+        return peer
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -3040,7 +3064,7 @@ def setup_wizard(args) -> dict | None:
             "name": args.name or REGIONS[region]["defaultName"],
             "slots": args.slots,
             "modules": [m.strip() for m in (args.modules or "vehicles,logistics,world").split(",") if m.strip()],
-            "db": args.db or os.path.join(BASE_DIR, "aetherhold.db"),
+            "db": args.db or os.environ.get("AETHERHOLD_DB") or os.path.join(BASE_DIR, "aetherhold.db"),
         }
 
     print("")
@@ -3242,8 +3266,8 @@ def main(argv=None) -> None:
                       help="connect to a running host instead of hosting")
     parser.add_argument("--host", default="0.0.0.0",
                         help="address to bind when hosting (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8080,
-                        help="port to listen on (default: 8080; 0 picks a free port)")
+    parser.add_argument("--port", type=int, default=None,
+                        help="port to listen on (default: $PORT or 8080; 0 picks a free port)")
     parser.add_argument("--room", default="", help="create a pre-made room with this name")
     parser.add_argument("--theme", default="ember", choices=sorted(THEMES),
                         help="world theme for the pre-made room")
@@ -3263,8 +3287,9 @@ def main(argv=None) -> None:
                         help="player capacity for the whole server (default: 12)")
     parser.add_argument("--modules", default="vehicles,logistics,world",
                         help="active modules, comma separated")
-    parser.add_argument("--db", default=os.path.join(BASE_DIR, "aetherhold.db"),
-                        help="SQLite database for fleet, cargo and discoveries")
+    parser.add_argument("--db", default=None,
+                        help="SQLite database for fleet, cargo and discoveries "
+                             "(default: $AETHERHOLD_DB or ./aetherhold.db)")
     parser.add_argument("--no-wizard", action="store_true",
                         help="skip the interactive setup wizard and use flags/defaults")
     parser.add_argument("--bans-file", default=DEFAULT_BANS_FILE,
@@ -3278,6 +3303,11 @@ def main(argv=None) -> None:
     if not os.path.isdir(PUBLIC_DIR):
         print(f"  ! Missing client folder: {PUBLIC_DIR}", file=sys.stderr)
         raise SystemExit(1)
+
+    if args.port is None:
+        args.port = int(os.environ.get("PORT", "8080"))
+    if args.db is None:
+        args.db = os.environ.get("AETHERHOLD_DB") or os.path.join(BASE_DIR, "aetherhold.db")
 
     if args.connect:
         run_connect(args)

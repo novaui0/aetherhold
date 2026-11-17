@@ -8,8 +8,8 @@ import { World } from "./world.js";
 import { WorldMap } from "./worldmap.js";
 import { language, onLanguage, setLanguage, t, translateDom } from "./i18n.js";
 import {
-  character, CLASSES, enterFullscreen, getClientId, settings, sheetRows, STAT_KEYS, STAT_LABELS,
-  STAT_MAX, toggleFullscreen,
+  character, characterPayload, CLASSES, enterFullscreen, getClientId, saveSettings, settings,
+  sheetRows, STAT_KEYS, STAT_LABELS, STAT_MAX, toggleFullscreen,
 } from "./store.js";
 
 const $ = (id) => document.getElementById(id);
@@ -484,6 +484,26 @@ function nodeLabel(node) {
   return `${t(`site.${node.kind}`)} · ${node.climate}`;
 }
 
+// ── TV / couch mode ─────────────────────────────────────────────────────
+// A single class on <body>; public/css/style.css scales the HUD for a sofa
+// and a controller, and Settings → Graphics keeps the toggle honest.
+function tvModeOn() {
+  return document.body.classList.contains("tv-mode");
+}
+
+function setTvMode(on, announce = true) {
+  document.body.classList.toggle("tv-mode", Boolean(on));
+  settings.tv = Boolean(on);
+  saveSettings({ tv: Boolean(on) });
+  const input = $("set-tv");
+  if (input) input.checked = Boolean(on);
+  if (announce) gameToast(on ? "TV modu açık — HUD ve yazılar büyütüldü" : "TV modu kapalı");
+}
+
+function toggleTvMode() {
+  setTvMode(!tvModeOn());
+}
+
 function updateVehicleHud(state = vehicleState) {
   // Vehicle panel only lives while you are inside a vehicle.
   if (!state || !state.inVehicle) {
@@ -744,7 +764,84 @@ function startFleetSync() {
 }
 
 // ── session lifecycle ───────────────────────────────────────────────────
-function startSession(activeClient, data) {
+
+let actionBarTimer = null;
+
+function startActionBar() {
+  clearInterval(actionBarTimer);
+  updateActionBar();
+  actionBarTimer = setInterval(updateActionBar, 220);
+}
+
+function startSync() {
+  clearInterval(syncTimer);
+  syncTimer = setInterval(syncTick, 110);
+  syncTick();
+}
+
+let recoveringSession = false;
+
+// Re-join the same hall with the same character. The token changes, the world
+// keeps running.
+async function recoverSession() {
+  if (recoveringSession || !client?.code) return false;
+  recoveringSession = true;
+  try {
+    const data = await client.join(client.code, { player: characterPayload() });
+    if (!data) return false;
+    session = session || {};
+    world?.setSelf(data.playerId);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    recoveringSession = false;
+  }
+}
+
+async function syncTick() {
+  if (syncing || !client?.code || !world || !session) return;
+  syncing = true;
+  try {
+    const data = await client.sync(world.localState());
+    if (!session) return;
+    world.applyPlayers(data.players || []);
+    updateParty(data.players || []);
+    updateFear(data.fear);
+    for (const message of data.messages || []) {
+      if (message.seq > lastMessageSeq) {
+        lastMessageSeq = message.seq;
+        appendMessage(message);
+      }
+    }
+  } catch (error) {
+    if (error.status === 401) {
+      // The host drops players that stop syncing, and the first frame of a new
+      // district can take a while to build. Reclaim the seat silently once
+      // instead of throwing the player back to the menu.
+      if (await recoverSession()) return;
+      gameToast("The hall closed — returning to the menu", "bad");
+      leaveRoom();
+    } else if (error.status === 404) {
+      gameToast("The hall closed — returning to the menu", "bad");
+      leaveRoom();
+    } else if (error.status === 403) {
+      gameToast(error.message, "bad");
+      leaveRoom();
+    }
+  } finally {
+    syncing = false;
+  }
+}
+
+// Hides the boot and loading overlays. The boot element is hidden, not removed,
+// so the next world entry can reuse it (and the startup test can still see it).
+function hideLoadingScreen() {
+  $("boot")?.classList.add("hidden");
+  $("loading-screen")?.classList.add("hidden");
+}
+
+async function startSession(activeClient, data) {
   client = activeClient;
   session = {
     playerId: data.playerId,
@@ -756,9 +853,24 @@ function startSession(activeClient, data) {
   menu.hide();
   const game = $("game");
   game?.classList.remove("hidden");
-  $("vehicle-hud")?.classList.remove("hidden");
+  // The vehicle panel is revealed by updateVehicleHud() only once you are seated.
+  $("vehicle-hud")?.classList.add("hidden");
   applyCinematicLook();
   backdropVisible = false;
+
+  // Show loading screen during world build (with transition)
+  $("boot")?.classList.remove("hidden");
+  $("boot")?.classList.add("done");
+  $("loading-screen")?.classList.remove("hidden");
+  if ($("loading-text")) $("loading-text").textContent = "Sunucuya bağlanılıyor…";
+
+  // Failsafe: a broken sub-system must never strand the player on the loading
+  // screen. Whatever happens below, the overlay closes and the error surfaces.
+  const loadingFailsafe = setTimeout(() => {
+    console.error("[aetherhold] world entry timed out — closing the loading screen");
+    hideLoadingScreen();
+    gameToast("Dünya kurulurken bir hata oluştu — ayrıntılar tarayıcı konsolunda.", "error");
+  }, 25000);
 
   const roomName = $("hud-room-name");
   if (roomName) roomName.textContent = data.room?.name || "A hall";
@@ -767,7 +879,11 @@ function startSession(activeClient, data) {
   const roomTheme = $("hud-room-theme");
   if (roomTheme) {
     const key = data.room?.theme || "ember";
-    roomTheme.textContent = { ember: "Ember Camp", moonlit: "Moonlit Grove", frost: "Frostfall Ruins" }[key] || key;
+    roomTheme.textContent = {
+      ember: "Ember Camp",
+      moonlit: "Moonlit Grove",
+      frost: "Frostfall Ruins",
+    }[key] || key;
   }
 
   setHudCharacter();
@@ -783,9 +899,14 @@ function startSession(activeClient, data) {
   if (channel) { channel.textContent = "IC"; channel.dataset.channel = "ic"; }
   updateFear({ active: false, secondsLeft: 0, by: "" });
 
+  const buildStarted = performance.now();
   world = new World($("world"), {
     settings, theme: data.room?.theme || "ember", language,
   });
+  console.info(`[aetherhold] district built in ${Math.round(performance.now() - buildStarted)} ms`);
+  // Debug handle: the browser console and the QA scripts use this to inspect
+  // the live scene without reaching into module scope.
+  window.__world = world;
   world.setSelf(data.playerId);
   world.setCharacter(character);
   world.applyPlayers(data.room?.players || []);
@@ -803,7 +924,7 @@ function startSession(activeClient, data) {
   world.onNpc = (npc) => {
     const lines = GOSSIP[language] || GOSSIP.en;
     const line = lines[npc.role] || lines.innkeeper;
-    gameToast(`${npc.name} · ${npc.title} — “${line}”`, "");
+    gameToast(`${npc.name} · ${npc.title} — "${line}"`, "");
     audio.chime();
   };
   world.onAction = (action) => {
@@ -824,6 +945,32 @@ function startSession(activeClient, data) {
   world.onViewChange = (firstPerson) => {
     gameToast(firstPerson ? "First person — you are your eyes" : "Over the shoulder");
   };
+
+  // ── controller ──────────────────────────────────────────────────────
+  // Same paths as the keyboard: the pad only presses the same keys. A pad
+  // module that fails to load must never cost the player the world.
+  world.gamepad?.stop();
+  try {
+    const { GamepadDriver } = await import("./gamepad.js");
+    world.gamepad = new GamepadDriver(world, {
+      onNotice: (text, kind) => gameToast(text, kind),
+      onPause: () => { overlayOpen("pause") ? closeAllOverlays() : showOverlay("pause"); },
+      onMap: () => toggleMap(),
+      onSheet: () => { overlayOpen("sheet") ? hideOverlay("sheet") : (closeAllOverlays(), showOverlay("sheet")); },
+      onInventory: () => { chestOpen ? closeChest() : openChest(); },
+      onTvMode: () => toggleTvMode(),
+    });
+    world.gamepad.start();
+  } catch (error) {
+    console.warn("[aetherhold] gamepad support unavailable", error);
+  }
+
+  // Telefon, envanter ve load screen sistemlerini başlat
+  await world.initSystems(data.playerId);
+
+  // Yükleme ekranını güncelle
+  if ($("loading-text")) $("loading-text").textContent = "Dünya yükleniyor…";
+
   world.start();
   showCenterOnJoin();
   updateParty(data.room?.players || []);
@@ -839,8 +986,20 @@ function startSession(activeClient, data) {
   startFleetSync();
   startSync();
   startActionBar();
+  audio.inMenu = false;
   audio.startAmbience();
   audio.startMusic();
+
+  // Telefon ve envanter UI'larını bağla (world'tan sonra). Tek bir UI modülü
+  // bozuksa dünya girişi komple düşmesin: hata loglanır, oyun devam eder.
+  for (const [label, ui] of [["phoneUI", world.phoneUI], ["inventoryUI", world.inventoryUI]]) {
+    try {
+      if (typeof ui?.setHost === "function") ui.setHost(world);
+      else if (ui) console.warn(`[aetherhold] ${label} has no setHost(), skipped`);
+    } catch (error) {
+      console.error(`[aetherhold] ${label}.setHost failed`, error);
+    }
+  }
 
   const hint = $("hud-hint");
   if (hint) {
@@ -851,51 +1010,16 @@ function startSession(activeClient, data) {
   setTimeout(() => {
     if (!overlayOpen("pause") && !overlayOpen("sheet") && !overlayOpen("help")) world?.requestLook();
   }, 250);
-}
 
-let actionBarTimer = null;
-
-function startActionBar() {
-  clearInterval(actionBarTimer);
-  updateActionBar();
-  actionBarTimer = setInterval(updateActionBar, 220);
-}
-
-function startSync() {
-  clearInterval(syncTimer);
-  syncTimer = setInterval(syncTick, 110);
-  syncTick();
-}
-
-async function syncTick() {
-  if (syncing || !client?.code || !world || !session) return;
-  syncing = true;
-  try {
-    const data = await client.sync(world.localState());
-    if (!session) return;
-    world.applyPlayers(data.players || []);
-    updateParty(data.players || []);
-    updateFear(data.fear);
-    for (const message of data.messages || []) {
-      if (message.seq > lastMessageSeq) {
-        lastMessageSeq = message.seq;
-        appendMessage(message);
-      }
-    }
-  } catch (error) {
-    if (error.status === 401 || error.status === 404) {
-      gameToast("The hall closed — returning to the menu", "bad");
-      leaveRoom();
-    } else if (error.status === 403) {
-      gameToast(error.message, "bad");
-      leaveRoom();
-    }
-  } finally {
-    syncing = false;
-  }
+  // Hide loading screen once the world is fully built and interactive.
+  // The CSS transition owns the fade; the failsafe is cancelled here.
+  clearTimeout(loadingFailsafe);
+  $("boot")?.classList.add("done");
+  setTimeout(hideLoadingScreen, 800);
 }
 
 async function leaveRoom(notice = "") {
+  world?.gamepad?.stop();
   clearInterval(syncTimer);
   syncTimer = null;
   clearInterval(actionBarTimer);
@@ -918,6 +1042,7 @@ async function leaveRoom(notice = "") {
   session = null;
   world?.dispose();
   world = null;
+  window.__world = null;
   fearState = { active: false, secondsLeft: 0, by: "" };
   backdropVisible = true;
   $("game")?.classList.add("hidden");
@@ -1331,6 +1456,9 @@ function bindOverlays() {
     } else if (key === "i") {
       event.preventDefault();
       chestOpen ? closeChest() : openChest();
+    } else if (key === "t") {
+      event.preventDefault();
+      toggleTvMode();
     } else if (key === "enter" && !overlayOpen("pause") && !overlayOpen("sheet")
       && !overlayOpen("help") && !overlayOpen("map-overlay")) {
       event.preventDefault();
@@ -1348,6 +1476,8 @@ function bindOverlays() {
 
 // ── boot ────────────────────────────────────────────────────────────────
 function boot() {
+  // TV mode is persisted, so a couch session comes back the way it was left.
+  if (settings.tv) document.body.classList.add("tv-mode");
   resize();
   frame();
   applyCinematicLook();
@@ -1387,9 +1517,15 @@ function boot() {
     menu?.toast?.(document.fullscreenElement ? "Fullscreen" : "Windowed");
   });
 
+  // Show boot screen while connecting to server
+  $("boot")?.classList.remove("hidden");
+  if ($("boot-text")) $("boot-text").textContent = "Sunucuara bağlanılıyor…";
+
   menu.connectToServer(menu.client.base, true).then(async (ok) => {
     if (!ok) {
-      gameToast("No host at the current address — start server.py or set one in Join Server", "bad");
+      gameToast("Bağlantı sağlanamadı — sunucuyu başlatın veya Join Server'dan bir adres girin", "bad");
+      $("boot")?.classList.add("done");
+      setTimeout(() => $("boot")?.classList.add("hidden"), 800);
       return;
     }
     // A Turkish server greets a first-time visitor in Turkish; an explicit
@@ -1404,10 +1540,24 @@ function boot() {
         menu._onLanguage?.();
       }
     } catch { /* the host is allowed to change its mind */ }
+
+    // Hide boot screen after connection established (don't remove - startSession may need it)
+    $("boot")?.classList.add("done");
+    setTimeout(() => {
+      $("boot")?.classList.add("hidden");
+    }, 800);
+  }).catch(() => {
+    $("boot")?.classList.add("done");
+    setTimeout(() => $("boot")?.classList.add("hidden"), 800);
   });
 
-  setTimeout(() => $("boot")?.classList.add("done"), 700);
-  setTimeout(() => $("boot")?.remove(), 1500);
+  // Remove boot screen after 5 seconds if still showing (timeout safety)
+  // Only remove if startSession hasn't been called yet
+  setTimeout(() => {
+    if ($("boot") && !$("boot")?.classList.contains("done")) {
+      $("boot")?.classList.add("hidden");
+    }
+  }, 5000);
 }
 
 window.addEventListener("beforeunload", () => {

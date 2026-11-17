@@ -230,7 +230,91 @@ function addRoadRings(group) {
     dash.position.set(Math.cos(angle) * RING_RADIUS, 0.031, Math.sin(angle) * RING_RADIUS);
     group.add(dash);
   }
+
+  // Raised kerbs give the asphalt an edge and cast a hairline shadow.
+  const kerbMat = mat("#8b857a", { roughness: 0.92 });
+  [RING_RADIUS - 4.35, RING_RADIUS + 4.35].forEach((radius) => {
+    const kerb = plainMesh(new THREE.TorusGeometry(radius, 0.17, 5, 160), kerbMat);
+    kerb.rotation.x = -Math.PI / 2;
+    kerb.position.y = 0.06;
+    group.add(kerb);
+  });
+
+  // Manhole covers and shallow puddles: cheap, and they sell the road surface.
+  const coverMat = mat("#33342f", { metalness: 0.6, roughness: 0.5 });
+  for (let i = 0; i < 9; i += 1) {
+    const angle = (i / 9) * TAU + 0.4;
+    const radius = RING_RADIUS + (i % 2 === 0 ? 1.9 : -2.1);
+    const cover = plainMesh(new THREE.CircleGeometry(0.42, 14), coverMat);
+    cover.rotation.x = -Math.PI / 2;
+    cover.position.set(Math.cos(angle) * radius, 0.034, Math.sin(angle) * radius);
+    group.add(cover);
+  }
+  const waterMat = new THREE.MeshStandardMaterial({
+    color: 0x141f27, metalness: 0.95, roughness: 0.08, transparent: true, opacity: 0.85,
+  });
+  for (let i = 0; i < 12; i += 1) {
+    const angle = Math.random() * TAU;
+    const radius = RING_RADIUS + (Math.random() - 0.5) * 6.5;
+    const puddle = plainMesh(new THREE.CircleGeometry(0.7 + Math.random() * 1.5, 12), waterMat);
+    puddle.rotation.x = -Math.PI / 2;
+    puddle.scale.z = 0.45 + Math.random() * 0.5;
+    puddle.position.set(Math.cos(angle) * radius, 0.028, Math.sin(angle) * radius);
+    group.add(puddle);
+  }
   return asphalt;
+}
+
+// Small helper so the geometry caches above stay readable for one-off meshes.
+function plainMesh(geometry, material) {
+  const node = new THREE.Mesh(geometry, material);
+  node.receiveShadow = true;
+  return node;
+}
+
+// ── building detail ────────────────────────────────────────────────────
+// A band of windows: frame, glass and a sill. Lit panes make the façades read
+// as rooms at night instead of as painted boxes.
+function addWindows(parent, { x = 0, y = 2.1, z = 0, count = 4, width = 1.5, height = 1.4, spacing = 0.9, lit = 0.6, depth = 0 }) {
+  const frame = mat("#2c2c31", { roughness: 0.75, metalness: 0.2 });
+  const dark = mat("#2b4152", { metalness: 0.55, roughness: 0.16 });
+  const warm = mat("#ffdca6", { emissive: "#ffbe6a", emissiveIntensity: 0.75, roughness: 0.45 });
+  const sill = mat("#565146", { roughness: 0.9 });
+  const step = width + spacing;
+  const start = -((count - 1) * step) / 2;
+  for (let i = 0; i < count; i += 1) {
+    const wx = x + start + i * step;
+    box(parent, width + 0.24, height + 0.24, 0.12, frame, [wx, y, z]);
+    box(parent, width, height, 0.1, Math.random() < lit ? warm : dark, [wx, y, z + 0.035]);
+    box(parent, width + 0.36, 0.11, 0.26, sill, [wx, y - height / 2 - 0.12, z + 0.03]);
+    if (depth) box(parent, width - 0.3, height - 0.3, 0.04, dark, [wx, y, z - depth], [0, Math.PI, 0]);
+  }
+}
+
+// Roof clutter: condensers, a vent stack and a mast. Seen from the road at dusk
+// this is most of what distinguishes one building from another.
+function addRoofKit(parent, { x = 0, y = 0, z = 0, width = 8, depth = 5 }) {
+  const metal = mat("#4c525a", { metalness: 0.5, roughness: 0.5 });
+  const dark = mat("#2d3137", { roughness: 0.8 });
+  box(parent, 1.9, 0.72, 1.4, metal, [x - width * 0.24, y + 0.36, z]);
+  box(parent, 2.0, 0.12, 1.5, dark, [x - width * 0.24, y + 0.74, z]);
+  box(parent, 0.95, 0.55, 0.95, metal, [x + width * 0.17, y + 0.28, z + depth * 0.14]);
+  mesh(parent, geo("ventPipe", () => new THREE.CylinderGeometry(0.12, 0.12, 1.15, 8)), metal,
+    [x + width * 0.32, y + 0.58, z - depth * 0.18]);
+  mesh(parent, geo("ventCap", () => new THREE.CylinderGeometry(0.2, 0.14, 0.18, 8)), dark,
+    [x + width * 0.32, y + 1.2, z - depth * 0.18]);
+}
+
+// Vertical wall ribs, a darker plinth and corner pilasters: the things that stop
+// a long wall from reading as a single untextured plane.
+function addWallRibs(parent, { width, height, depth, x = 0, z = 0, count = 10, material }) {
+  const ribs = material || mat("#6a655c", { roughness: 0.9, metalness: 0.15 });
+  const plinth = mat("#413c35", { roughness: 0.95 });
+  for (let i = 0; i < count; i += 1) {
+    const rx = x - width / 2 + (i + 0.5) * (width / count);
+    box(parent, width / count * 0.24, height - 0.6, 0.1, ribs, [rx, height / 2, z]);
+  }
+  box(parent, width + 0.16, 0.55, depth + 0.16, plinth, [x, 0.27, z + 0.05]);
 }
 
 // Street furniture: lamp posts with warm light pools, guardrail posts on the
@@ -293,6 +377,53 @@ function addStreetFurniture(group) {
     box(group, 0.34, 0.7, 0.2, stoneMat,
       [Math.cos(angle) * radius, 0.35, Math.sin(angle) * radius], [0, -angle, 0]);
   }
+
+  // Overhead line: timber poles with two sagging wires. Vertical rhythm and a
+  // silhouette against the sky, for less geometry than one street lamp.
+  const woodMat = mat("#4b3a2a", { roughness: 1 });
+  const porcelain = mat("#b9b2a4", { roughness: 0.6 });
+  const poleCount = 14;
+  const posts = [];
+  for (let i = 0; i < poleCount; i += 1) {
+    const angle = (i / poleCount) * TAU + 0.19;
+    const radius = RING_RADIUS + 9.6;
+    const x = Math.cos(angle) * radius;
+    const z = Math.sin(angle) * radius;
+    posts.push({ x, z });
+    box(group, 0.26, 8.8, 0.26, woodMat, [x, 4.4, z]);
+    box(group, 2.1, 0.13, 0.13, woodMat, [x, 8.1, z], [0, -angle, 0]);
+    [-0.85, 0.85].forEach((off) => {
+      box(group, 0.1, 0.22, 0.1, porcelain,
+        [x + Math.cos(angle) * off, 8.28, z + Math.sin(angle) * off]);
+    });
+  }
+  const wirePoints = [];
+  for (let i = 0; i < poleCount; i += 1) {
+    const a = posts[i];
+    const b = posts[(i + 1) % poleCount];
+    [-0.85, 0.85].forEach((off) => {
+      const steps = 8;
+      let prev = null;
+      for (let s = 0; s <= steps; s += 1) {
+        const t = s / steps;
+        const point = new THREE.Vector3(
+          a.x + (b.x - a.x) * t + Math.cos(Math.atan2(b.z - a.z, b.x - a.x) + Math.PI / 2) * off,
+          8.3 - Math.sin(Math.PI * t) * 1.05,
+          a.z + (b.z - a.z) * t + Math.sin(Math.atan2(b.z - a.z, b.x - a.x) + Math.PI / 2) * off
+        );
+        if (prev) {
+          wirePoints.push(prev.x, prev.y, prev.z, point.x, point.y, point.z);
+        }
+        prev = point;
+      }
+    });
+  }
+  const wireGeometry = new THREE.BufferGeometry();
+  wireGeometry.setAttribute("position", new THREE.Float32BufferAttribute(wirePoints, 3));
+  const wires = new THREE.LineSegments(wireGeometry, new THREE.LineBasicMaterial({
+    color: 0x181b20, transparent: true, opacity: 0.8,
+  }));
+  group.add(wires);
 }
 
 function addSpoke(group, site, asphalt) {
@@ -338,6 +469,20 @@ function addFuelStation(group, site) {
   box(root, 7, 3.4, 5, mat("#6b5a49", { roughness: 0.92 }), [9, 1.7, -6]);
   box(root, 7.4, 0.3, 5.4, mat("#3b3129"), [9, 3.5, -6]);
   box(root, 4.4, 1.6, 0.12, mat("#ffd79a", { emissive: "#ffb457", emissiveIntensity: 0.65 }), [9, 2.0, -3.45]);
+  // Shop front: mullions, a door canopy, a lit fascia and a roof condenser.
+  [-4.4, -2.2, 0, 2.2, 4.4].forEach((mx) => box(root, 0.1, 1.7, 0.14, mat("#2e2a24"), [9 + mx / 2, 2.0, -3.42]));
+  box(root, 7.6, 0.12, 1.2, mat("#3b3129"), [9, 3.2, -3.0], [0.12, 0, 0]);
+  box(root, 7.2, 0.55, 0.14, mat("#e8b45a", { emissive: "#ffab3d", emissiveIntensity: 0.9 }), [9, 3.05, -3.38]);
+  addRoofKit(root, { x: 9, y: 3.55, z: -6.2, width: 5, depth: 3 });
+  // Bollards around the forecourt and a bin by the door.
+  for (let i = 0; i < 6; i += 1) {
+    box(root, 0.22, 0.85, 0.22, mat("#c9c2b4", { roughness: 0.85 }), [-6 + i * 3.4, 0.43, 6.4]);
+    box(root, 0.26, 0.1, 0.26, mat("#d94f3a", { emissive: "#7a1f14", emissiveIntensity: 0.3 }), [-6 + i * 3.4, 0.9, 6.4]);
+  }
+  mesh(root, geo("canopyStrip", () => new THREE.BoxGeometry(16, 0.08, 0.5)),
+    mat("#fff2cd", { emissive: "#ffdca2", emissiveIntensity: 1.6 }), [0, 5.1, -2.2]);
+  mesh(root, geo("canopyStrip2", () => new THREE.BoxGeometry(16, 0.08, 0.5)),
+    mat("#fff2cd", { emissive: "#ffdca2", emissiveIntensity: 1.6 }), [0, 5.1, 2.2]);
   mesh(root, geo("siteSign", () => new THREE.CylinderGeometry(0.14, 0.14, 5.4, 6)), steel, [12.5, 2.7, 4]);
   const sign = new THREE.Mesh(new THREE.BoxGeometry(3.4, 1.2, 0.16), brand);
   sign.position.set(12.5, 5.0, 4);
@@ -361,10 +506,27 @@ function addGarage(group, site) {
   [-5, 5].forEach((sx) => {
     box(root, 7.6, 5.4, 0.3, door, [sx, 2.9, 3.55]);
     for (let i = 0; i < 6; i += 1) box(root, 7.4, 0.1, 0.06, mat("#2c3238"), [sx, 0.4 + i, 3.75]);
+    // Door frame, guide rails and a strip of work lamps under the header.
+    box(root, 0.22, 5.6, 0.36, mat("#3b3f45"), [sx - 3.9, 2.9, 3.66]);
+    box(root, 0.22, 5.6, 0.36, mat("#3b3f45"), [sx + 3.9, 2.9, 3.66]);
+    box(root, 0.2, 0.24, 0.2, mat("#ffe6b0", { emissive: "#ffd489", emissiveIntensity: 1.4 }), [sx, 5.75, 3.72]);
   });
   box(root, 9, 1.2, 0.2, mat("#b23a2b", { roughness: 0.6 }), [0, 6.2, 3.5]);
   box(root, 21, 0.25, 8, roof, [0, 7.35, 3.8]);
   [-9, 9].forEach((sx) => box(root, 0.35, 7, 0.35, mat("#5b544a"), [sx, 3.5, 3.2]));
+
+  // Clerestory strip over the workshop floor.
+  addWindows(root, { y: 6.25, z: 3.62, count: 4, width: 1.5, height: 0.75, spacing: 1.6, lit: 0.8 });
+  // Office wing against the east wall, with its own lit windows and a door.
+  const wing = new THREE.Group();
+  wing.position.set(13.2, 0, 3.4);
+  root.add(wing);
+  box(wing, 6, 4.2, 7, wall, [0, 2.1, 0]);
+  box(wing, 6.5, 0.4, 7.5, roof, [0, 4.4, 0]);
+  addWindows(wing, { y: 2.5, z: 3.52, count: 2, width: 1.3, height: 1.2, spacing: 0.8, lit: 1 });
+  box(wing, 1.1, 2.2, 0.16, mat("#3d4348", { metalness: 0.4 }), [-2.2, 1.1, 3.54]);
+  box(wing, 1.3, 0.2, 0.4, mat("#ffe0a6", { emissive: "#ffc978", emissiveIntensity: 1.1 }), [-2.2, 2.4, 3.6]);
+  addRoofKit(root, { y: 7.5, z: -4, width: 14, depth: 8 });
   // Tyre stacks and a parts bench outside, so the yard reads as a working shop.
   for (let i = 0; i < 9; i += 1) {
     const tx = -11 + (i % 3) * 1.1;
@@ -413,7 +575,13 @@ function addScrapyard(group, site) {
   }
   box(root, 9, 3, 6, rustDark, [8, 1.5, 9]);
   box(root, 9.6, 0.3, 6.6, mat("#3a3f43"), [8, 3.1, 9]);
-  box(root, 4, 1.2, 0.2, mat("#d2a33c", { roughness: 0.7 }), [8, 2.2, 12.05]);
+  // Corrugated sheet walls, a barred window and a lean-to for the torch set.
+  addWallRibs(root, { x: 8, width: 8.8, height: 2.9, depth: 0.2, z: 12.0, count: 14, material: mat("#6a4530", { roughness: 1 }) });
+  box(root, 4, 1.2, 0.2, mat("#d2a33c", { roughness: 0.7 }), [8, 2.35, 12.1], [0, 0, 0.03]);
+  box(root, 1.5, 1.0, 0.12, mat("#1d2430", { metalness: 0.4, roughness: 0.35 }), [10.5, 1.5, 12.06]);
+  for (let i = 0; i < 3; i += 1) box(root, 0.06, 1.0, 0.08, mat("#3b3f45", { metalness: 0.6 }), [10.05 + i * 0.45, 1.5, 12.12]);
+  box(root, 5.5, 0.18, 3.2, mat("#4a3a2c", { roughness: 1 }), [3.5, 2.6, 12.5], [0, 0, 0.1]);
+  [-1, 1].forEach((side) => box(root, 0.18, 2.5, 0.18, mat("#4a3a2c"), [3.5 + side * 2.4, 1.3, 12.5]));
   return root;
 }
 
@@ -449,6 +617,14 @@ function addCamp(group, site) {
   const flame = new THREE.PointLight(0xff8a3c, 26, 22, 2);
   flame.position.set(0, 0.9, 2.4);
   root.add(flame);
+  // Lantern poles: the camp's only real light after dark.
+  const poleMat = mat("#4c3a28", { roughness: 0.95 });
+  const lanternMat = mat("#ffdf9c", { emissive: "#ffbe57", emissiveIntensity: 2.1, roughness: 0.35 });
+  [[-6, 3], [6, 4], [-3, 8], [4, 9]].forEach(([lx, lz]) => {
+    mesh(root, geo("lanternPole", () => new THREE.CylinderGeometry(0.08, 0.1, 3.2, 6)), poleMat, [lx, 1.6, lz]);
+    box(root, 0.44, 0.1, 0.44, poleMat, [lx, 3.24, lz]);
+    box(root, 0.3, 0.42, 0.3, lanternMat, [lx, 3.0, lz]);
+  });
   const ember = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1.199, 7),
     new THREE.MeshBasicMaterial({ color: 0xff9c4a, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }));
   ember.position.set(0, 0.7, 2.4);
@@ -482,6 +658,24 @@ function addWarehouse(group, site) {
   box(root, 27, 0.7, 16, roof, [0, 9.3, -3]);
   box(root, 8, 6.4, 0.3, mat("#4d555c", { metalness: 0.5, roughness: 0.5 }), [0, 3.2, 4.55]);
   for (let i = 0; i < 8; i += 1) box(root, 7.8, 0.1, 0.06, mat("#2f353a"), [0, 0.5 + i * 0.8, 4.75]);
+  // Dock bumpers, a dock lamp and a roller shutter hood over the door.
+  [-4.3, 4.3].forEach((bx) => {
+    box(root, 0.4, 1.1, 0.3, mat("#1f2226", { roughness: 0.9 }), [bx, 0.75, 4.72]);
+    box(root, 0.36, 0.5, 0.3, mat("#1f2226", { roughness: 0.9 }), [bx, 2.4, 4.72]);
+  });
+  box(root, 8.4, 0.9, 0.7, mat("#3a4146", { metalness: 0.4, roughness: 0.6 }), [0, 6.85, 4.6]);
+  box(root, 0.5, 0.3, 0.3, mat("#ffe6b0", { emissive: "#ffd489", emissiveIntensity: 1.5 }), [0, 6.3, 4.95]);
+  // Corrugated wall panels either side of the door and a band of high windows.
+  addWallRibs(root, { x: -8.6, width: 8.4, height: 8.4, depth: 0.2, z: 4.56, count: 9 });
+  addWallRibs(root, { x: 8.6, width: 8.4, height: 8.4, depth: 0.2, z: 4.56, count: 9 });
+  addWindows(root, { y: 7.4, z: 4.6, count: 6, width: 1.2, height: 0.9, spacing: 1.1, lit: 0.45 });
+  // Roof skylights and plant, visible from the ring road at dusk.
+  for (let i = 0; i < 3; i += 1) {
+    box(root, 2.4, 0.16, 1.4, mat("#9fb6c4", { metalness: 0.3, roughness: 0.25, emissive: "#243642", emissiveIntensity: 0.6 }),
+      [-8 + i * 8, 9.7, -2]);
+    box(root, 2.6, 0.24, 1.6, mat("#53595f", { metalness: 0.4 }), [-8 + i * 8, 9.56, -2]);
+  }
+  addRoofKit(root, { x: 6, y: 9.7, z: -6, width: 12, depth: 6 });
   for (let i = 0; i < 6; i += 1) {
     const cx = -14 + (i % 3) * 2.6;
     const cz = 8 + Math.floor(i / 3) * 2.2;
@@ -519,7 +713,7 @@ function addViewTower(group, site) {
   return root;
 }
 
-function createNpcRecord(presetId, site, position, roleKey, language) {
+export function createNpcRecord(presetId, site, position, roleKey, language) {
   const preset = CHARACTER_PRESETS.find((item) => item.id === presetId) || CHARACTER_PRESETS[0];
   const group = buildAvatar({ ...preset, name: preset.name });
   group.position.set(position.x, 0, position.z);
@@ -946,6 +1140,45 @@ export function createTruck(color = "#b34a3a") {
     box(truck, 0.4, 0.18, 0.1, taillight, [side * 0.85, 1.5, -7.9]);
     box(truck, 0.1, 0.4, 0.1, mat("#f2c14e", { emissive: "#d99a1a", emissiveIntensity: 0.5 }), [side * 1.25, 1.65, -7.7]);
   });
+  // Fuel tanks under the cab steps.
+  [-1, 1].forEach((side) => {
+    mesh(truck, geo("truckTank", () => new THREE.CylinderGeometry(0.33, 0.33, 1.5, 14)), chrome,
+      [side * 1.22, 0.8, 1.55], [Math.PI / 2, 0, 0]);
+    box(truck, 0.06, 0.46, 1.5, mat("#2d2d33", { metalness: 0.4 }), [side * 1.2, 0.52, 1.55]);
+    // Steps and a grab handle, so the cab can actually be climbed.
+    box(truck, 0.45, 0.08, 0.9, chrome, [side * 1.26, 1.28, 3.95]);
+    box(truck, 0.45, 0.08, 0.9, chrome, [side * 1.26, 0.78, 3.95]);
+    box(truck, 0.07, 1.5, 0.07, chrome, [side * 1.34, 2.05, 4.6], [0, 0, 0]);
+    // Reflective tape down the trailer flank.
+    for (let i = 0; i < 7; i += 1) {
+      box(truck, 0.05, 0.13, 0.62,
+        i % 2 ? mat("#f0e6cf", { emissive: "#6a6252", emissiveIntensity: 0.4 })
+          : mat("#c0392b", { emissive: "#6d1d15", emissiveIntensity: 0.4 }),
+        [side * 1.31, 1.5, -1.4 - i * 0.85]);
+    }
+    // Mudflaps behind the drive axles.
+    box(truck, 0.62, 0.5, 0.06, mat("#26262b", { roughness: 0.95 }), [side * 0.95, 0.26, -6.85]);
+  });
+
+  // Air horns on the roof and marker lights along the cab roof.
+  [-0.42, 0, 0.42].forEach((hx) => {
+    mesh(truck, geo("horn", () => new THREE.CylinderGeometry(0.09, 0.12, 0.36, 10)), chrome,
+      [hx, 3.62, 3.5], [Math.PI / 2, 0, 0]);
+  });
+  [-0.9, -0.3, 0.3, 0.9].forEach((mx) => {
+    box(truck, 0.16, 0.1, 0.1, mat("#ffcd7a", { emissive: "#ffab38", emissiveIntensity: 1.2 }), [mx, 3.55, 2.0]);
+  });
+
+  // Trailer rear doors: two leaves, hinges, a locking bar and reflective panels.
+  [-0.62, 0.62].forEach((dx) => {
+    box(truck, 1.2, 2.5, 0.1, mat("#cfcabb", { roughness: 0.6, metalness: 0.2 }), [dx, 2.62, -7.9]);
+    box(truck, 0.06, 2.4, 0.06, mat("#8f8a7e", { metalness: 0.5 }), [dx + 0.62, 2.62, -7.96]);
+    [1.9, 3.4].forEach((hy) => box(truck, 0.16, 0.1, 0.1, chrome, [dx + 0.55, hy, -7.97]));
+  });
+  box(truck, 0.1, 2.2, 0.1, chrome, [0, 2.9, -8.0]);
+  box(truck, 2.4, 0.16, 0.12, mat("#3a3a40", { metalness: 0.4 }), [0, 1.05, -8.02]);
+  [-0.78, 0.78].forEach((lx) => box(truck, 0.16, 1.1, 0.16, mat("#4a4a52", { metalness: 0.5 }), [lx, 0.85, -1.6]));
+
   // Mudflaps and rear bar.
   box(truck, 2.5, 0.22, 0.16, mat("#33343a"), [0, 0.65, -8.0]);
   // Wheels: steer axle + dual drive axles.

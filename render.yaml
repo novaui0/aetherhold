@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: aetherhold
+    runtime: python
+    plan: free
+    buildCommand: echo "no dependencies"
+    startCommand: python server.py --no-wizard --no-browser
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: AETHERHOLD_ADMIN_PASSWORD
+        sync: false
+      - key: AETHERHOLD_ADMIN_KEY
+        sync: false

@@ -512,6 +512,10 @@
                 <div><strong>Camera shake</strong><span class="muted small">Rolls and heavy footsteps</span></div>
                 <label class="toggle"><input type="checkbox" id="set-shake" checked /><span class="track"></span></label>
               </div>
+              <div class="toggle-row">
+                <div><strong>TV mode</strong><span class="muted small">Bigger HUD and text for couch play (T)</span></div>
+                <label class="toggle"><input type="checkbox" id="set-tv" /><span class="track"></span></label>
+              </div>
             </div>
 
             <div class="card">
@@ -588,7 +592,7 @@
               </ul>
               <div class="divider"></div>
               <p class="muted small">
-                Aetherhold v1.0.0 · made for tables that cannot sit around one table.
+                Aetherhold v1.2.0 · made for tables that cannot sit around one table.
               </p>
             </div>
           </div>
@@ -902,7 +906,7 @@
   </div>
 </main>
 
-<div id="boot" class="boot">
+<div id="boot" class="boot hidden">
   <div class="boot-crest">
     <svg viewBox="0 0 64 64"><path d="M32 4l6.5 19.5L58 30l-19.5 6.5L32 56l-6.5-19.5L6 30l19.5-6.5z"/></svg>
   </div>
@@ -910,6 +914,15 @@
   <p id="boot-text">Kindling the embers…</p>
 </div>
 
+<!-- Loading screen shown when transitioning to the world --><div id="loading-screen" class="loading-screen hidden" aria-live="polite">
+  <div class="loading-content">
+    <div class="loading-spinner"></div>
+    <p id="loading-text">Loading the world…</p>
+  </div>
+</div>
+
+
+<script type="module" src="/js/loadscreen.js"></script>
 <script type="module" src="/js/main.js"></script>
 </body>
 </html>

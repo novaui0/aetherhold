@@ -226,6 +226,8 @@ export const DEFAULT_SETTINGS = {
   muted: false,
   bloom: true,
   motion: true,
+  // Couch play: bigger HUD, larger text, controller-first prompts.
+  tv: false,
 };
 
 export const DEFAULT_CHARACTER = {
