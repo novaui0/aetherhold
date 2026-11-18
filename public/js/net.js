@@ -56,24 +56,59 @@ export class GameClient {
     return request(this.base, "/api/health", { timeout: 5000 });
   }
 
+  // ── accounts ────────────────────────────────────────────────────────
+  // The password is only ever sent to the host that owns the account; the
+  // returned session token is what joins a room.
+  async register(username, password, base = this.base) {
+    return request(normalizeBase(base), "/api/register", {
+      method: "POST", body: { username, password }, timeout: 12000,
+    });
+  }
+
+  async login(username, password, base = this.base) {
+    return request(normalizeBase(base), "/api/login", {
+      method: "POST", body: { username, password }, timeout: 12000,
+    });
+  }
+
+  async accountSession(token, base = this.base) {
+    return request(normalizeBase(base), "/api/session", {
+      method: "POST", body: { token }, timeout: 7000,
+    });
+  }
+
+  async logout(token, base = this.base) {
+    return request(normalizeBase(base), "/api/logout", {
+      method: "POST", body: { token }, timeout: 5000,
+    });
+  }
+
+  // The driver sheet is read and written with the account session, so it
+  // follows the login rather than this browser's storage.
+  async character(token, action = "get", character = null, base = this.base) {
+    return request(normalizeBase(base), "/api/character", {
+      method: "POST", body: { session: token, action, character }, timeout: 8000,
+    });
+  }
+
   async rooms() {
     const data = await request(this.base, "/api/rooms", { timeout: 6000 });
     return data.rooms || [];
   }
 
-  async createRoom({ name, maxPlayers, password, theme, player }) {
+  async createRoom({ name, maxPlayers, password, theme, player, session = "" }) {
     const data = await request(this.base, "/api/rooms", {
       method: "POST",
-      body: { name, maxPlayers, password, theme, player },
+      body: { name, maxPlayers, password, theme, player, session },
     });
     this._adopt(data);
     return data;
   }
 
-  async join(code, { password = "", player }) {
+  async join(code, { password = "", player, session = "" }) {
     const data = await request(this.base, `/api/rooms/${encodeURIComponent(code.toUpperCase())}/join`, {
       method: "POST",
-      body: { password, player },
+      body: { password, player, session },
     });
     this._adopt(data);
     return data;
@@ -118,6 +153,32 @@ export class GameClient {
       method: "POST",
       body: { token: this.token, text },
       timeout: 6000,
+    });
+  }
+
+  // The profile, boss and trade endpoints all authenticate with the room token;
+  // clientId alone is never enough to spend another player's cash.
+  async profile(action = "get", payload = {}) {
+    return request(this.base, `/api/rooms/${this.code}/profile`, {
+      method: "POST",
+      body: { token: this.token, action, ...payload },
+      timeout: 8000,
+    });
+  }
+
+  async boss(action = "start", payload = {}) {
+    return request(this.base, `/api/rooms/${this.code}/boss`, {
+      method: "POST",
+      body: { token: this.token, action, ...payload },
+      timeout: 6000,
+    });
+  }
+
+  async trade(action, payload = {}) {
+    return request(this.base, `/api/rooms/${this.code}/trade`, {
+      method: "POST",
+      body: { token: this.token, action, ...payload },
+      timeout: 7000,
     });
   }
 

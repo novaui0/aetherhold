@@ -292,6 +292,38 @@ export class AudioEngine {
 
   message() { this.tone({ freq: 660, type: "sine", duration: 0.12, gain: 0.03 }); }
 
+  // A private arrival: a rising four-note figure, never broadcast to the room.
+  welcome() {
+    const notes = [392, 523.25, 659.25, 783.99];
+    notes.forEach((freq, index) => {
+      this.tone({
+        freq, type: "sine", duration: 0.5, gain: 0.045,
+        delay: index * 0.13,
+      });
+    });
+    this.tone({ freq: 98, type: "sine", duration: 1.1, gain: 0.035 });
+  }
+
+  door() {
+    this.tone({ freq: 180, type: "triangle", duration: 0.22, gain: 0.045, slide: -70 });
+    this.tone({ freq: 90, type: "sine", duration: 0.3, gain: 0.03, delay: 0.06 });
+  }
+
+  portal() {
+    this.tone({ freq: 110, type: "sawtooth", duration: 0.9, gain: 0.035, slide: 280 });
+    this.tone({ freq: 220, type: "sine", duration: 1.2, gain: 0.04, slide: 440, delay: 0.12 });
+    this.tone({ freq: 55, type: "sine", duration: 1.4, gain: 0.05, delay: 0.3 });
+  }
+
+  hit() { this.tone({ freq: 190, type: "square", duration: 0.06, gain: 0.03, slide: -80 }); }
+  hurt() { this.tone({ freq: 120, type: "sawtooth", duration: 0.14, gain: 0.05, slide: -50 }); }
+  loot() { this.tone({ freq: 880, type: "sine", duration: 0.1, gain: 0.035 }); this.tone({ freq: 1320, type: "sine", duration: 0.14, gain: 0.03, delay: 0.07 }); }
+  levelUp() {
+    [523.25, 659.25, 783.99, 1046.5].forEach((freq, index) => {
+      this.tone({ freq, type: "triangle", duration: 0.4, gain: 0.045, delay: index * 0.1 });
+    });
+  }
+
   // ── synthetic music tracks ──────────────────────────────────────────────
   // Each track is an array of layers: a looping AudioBuffer plus optional
   // filter/gain. They are built from scratch so the demo needs no external

@@ -4,10 +4,12 @@ import {
   ACCENTS, BUILDS, CHARACTER_PRESETS, CLASSES, CLOAK_COLORS, DETAILS, EYE_COLORS, FACE_SHAPES,
   GRAPHICS_PRESETS, HAIR_COLORS, HAIR_STYLES, NOSES, SKIN_TONES,
   STAT_KEYS, STAT_LABELS, STAT_MAX, STAT_MIN, STAT_BUDGET, THEMES, applyPreset, character,
-  characterPayload, DEFAULT_SETTINGS, enterFullscreen, randomCharacter, rememberServer,
-  saveCharacter, saveSettings, serverBaseFromQuery, settings, statsLeft, toggleFullscreen,
+  characterPayload, DEFAULT_SETTINGS, enterFullscreen, isMobileControlMode, randomCharacter,
+  rememberServer, saveCharacter, saveSettings, serverBaseFromQuery, settings, statsLeft,
+  toggleFullscreen,
 } from "./store.js";
 import { GameClient, normalizeBase } from "./net.js";
+import { AuthUI, account, forget, onAccount, pushDriver, resume, signOut, syncDriver } from "./auth.js";
 import { language, mountLanguagePicker, onLanguage, t, translateDom } from "./i18n.js";
 import { AvatarPreview } from "./preview3d.js";
 
@@ -37,11 +39,69 @@ export class MenuUI {
     this._initHost();
     this._initCodex();
     this._initMisc();
+    this._initAccount();
     this.applyCharacter();
     this.applySettings();
     mountLanguagePicker();
     onLanguage(() => this._onLanguage());
     this.refreshRooms();
+  }
+
+  // ── accounts ────────────────────────────────────────────────────────
+  // One overlay handles both sign-in and sign-up; it is also the gate in
+  // front of every room entry, because the host owns the driver's progress.
+  _initAccount() {
+    this.auth = new AuthUI({
+      audio: this.audio,
+      getBase: () => this.client?.base || "",
+      onNotice: (text, kind) => this.toast(text, kind),
+      // A driver is only meaningful once the host knows the account, so the
+      // sheet is adopted the moment sign-in succeeds.
+      onSignedIn: () => this.adoptDriver(),
+    });
+    this.auth.bind();
+    $("account-chip")?.addEventListener("click", () => {
+      if (account.ready) {
+        this.signOut();
+        return;
+      }
+      this.auth.open({ reason: "" });
+      this.audio?.click?.();
+    });
+    onAccount(() => this.auth.paintChip());
+    this.auth.paintChip();
+  }
+
+  /** Ask the host whether the remembered session is still good. */
+  async restoreAccount() {
+    if (!this.client?.base) return account;
+    await resume(this.client.base);
+    this.auth.paintChip();
+    if (account.ready) await this.adoptDriver();
+    return account;
+  }
+
+  /** Pull the account's driver sheet, or upload the one built here. */
+  async adoptDriver() {
+    if (!account.ready) return;
+    const origin = await syncDriver(this.client?.base || "");
+    if (origin === "server") this.applyCharacter();
+  }
+
+  async requireAccount(reason = "") {
+    if (!this.connected) await this.connectToServer(this.client.base, true);
+    if (!account.ready) await resume(this.client.base);
+    const ok = await this.auth.require(reason || t("auth.gate"));
+    this.auth.paintChip();
+    return ok;
+  }
+
+  async signOut() {
+    if (!account.ready) return;
+    const name = account.username;
+    await signOut(this.client?.base || account.base);
+    this.auth.paintChip();
+    this.toast(`${name} — ${t("auth.signedOut")}`);
   }
 
   // ── toasts ───────────────────────────────────────────────────────────
@@ -411,6 +471,8 @@ export class MenuUI {
     });
     this.draft.name = character.name;
     this.applyCharacter();
+    // Keep the account's copy current; a dead host must not block the editor.
+    if (account.ready) pushDriver(this.client?.base || "");
   }
 
   applyCharacter() {
@@ -456,6 +518,14 @@ export class MenuUI {
         this._patchSettings(patch);
         this.applySettings();
         this.toast(preset ? `${preset.label} graphics · ${preset.scale}% render scale` : quality, "good");
+      });
+    });
+    const modeSeg = $("control-mode-seg");
+    modeSeg?.querySelectorAll("button").forEach((button) => {
+      button.addEventListener("click", () => {
+        const mode = button.dataset.mode;
+        this._patchSettings({ controlMode: mode });
+        this.toast(`${t("settings.mode")}: ${t(`settings.mode.${mode}`)}`, "good");
       });
     });
     this._bindSlider("set-scale", "scale", (v) => `${v}%`);
@@ -511,6 +581,13 @@ export class MenuUI {
     seg?.querySelectorAll("button").forEach((b) => {
       b.classList.toggle("active", b.dataset.quality === settings.quality);
     });
+    const mode = settings.controlMode || "auto";
+    $("control-mode-seg")?.querySelectorAll("button").forEach((b) => {
+      b.classList.toggle("active", b.dataset.mode === mode);
+    });
+    // Same switch main.js uses; the stylesheet keys every touch rule off it.
+    // applySettings() ends by telling main, which mounts or drops the layer.
+    document.body.classList.toggle("mobile-mode", isMobileControlMode());
     const sync = (id, value, format) => {
       const input = $(id);
       if (input) input.value = value;
@@ -695,6 +772,7 @@ export class MenuUI {
 
   async joinRoom(code, password = "") {
     if (this.busy) return;
+    if (!(await this.requireAccount())) return;
     // Fullscreen needs the click's user gesture, so ask before the network call.
     enterFullscreen();
     this.busy = true;
@@ -703,11 +781,18 @@ export class MenuUI {
       if (!this.connected && !(await this.testConnection())) return;
       const pass = password || $("join-password")?.value || "";
       this.toast(`Knocking on ${code}…`);
-      const data = await this.client.join(code, { password: pass, player: characterPayload() });
+      const data = await this.client.join(code, {
+        password: pass, player: characterPayload(), session: account.token,
+      });
       this._enterRoom(data);
     } catch (error) {
       this.toast(error.message, "bad");
       this.audio.error();
+      if (error.status === 401) {
+        forget();
+        this.auth.paintChip();
+        this.auth.open({ reason: error.message });
+      }
     } finally {
       this.busy = false;
     }
@@ -742,7 +827,7 @@ export class MenuUI {
     $("host-create")?.addEventListener("click", () => {
       this.createRoom({
         name: $("host-name")?.value || "The Wanderer's Rest",
-        maxPlayers: Number(maxSlider?.value || 8),
+        maxPlayers: Number(maxSlider?.value || 16),
         password: $("host-password")?.value || "",
         theme: this.theme,
       });
@@ -875,10 +960,18 @@ export class MenuUI {
         : "YOUR_LAN_IP";
       connectCommand.textContent = `python server.py --connect http://${hostname}:${port}`;
     }
+
+    // A player who reached this page over the network has no server.py on
+    // disk, so the host card offers the exact file this server runs. Locally
+    // the file is already there and the link would only be noise.
+    const local = ["localhost", "127.0.0.1", "::1", ""].includes(location.hostname);
+    $("download-server")?.classList.toggle("hidden", local);
+    $("download-server-hint")?.classList.toggle("hidden", local);
   }
 
   async createRoom({ name, maxPlayers, password, theme }) {
     if (this.busy) return;
+    if (!(await this.requireAccount())) return;
     enterFullscreen();
     this.busy = true;
     this.audio.click();
@@ -890,12 +983,18 @@ export class MenuUI {
         password,
         theme,
         player: characterPayload(),
+        session: account.token,
       });
       this.toast(`Hall opened — code ${data.code}`, "good");
       this._enterRoom(data);
     } catch (error) {
       this.toast(error.message, "bad");
       this.audio.error();
+      if (error.status === 401) {
+        forget();
+        this.auth.paintChip();
+        this.auth.open({ reason: error.message });
+      }
     } finally {
       this.busy = false;
     }
@@ -903,6 +1002,7 @@ export class MenuUI {
 
   async quickPlay() {
     if (this.busy) return;
+    if (!(await this.requireAccount())) return;
     enterFullscreen();
     this.audio.click();
     this.busy = true;
@@ -920,7 +1020,9 @@ export class MenuUI {
         .filter((room) => !room.locked && room.players < room.maxPlayers)
         .sort((a, b) => b.players - a.players);
       if (open.length) {
-        const data = await this.client.join(open[0].code, { password: "", player: characterPayload() });
+        const data = await this.client.join(open[0].code, {
+          password: "", player: characterPayload(), session: account.token,
+        });
         this.toast(`Joined ${open[0].name}`, "good");
         this._enterRoom(data);
         return;
@@ -935,16 +1037,22 @@ export class MenuUI {
       }
       const data = await this.client.createRoom({
         name: "The Wanderer's Rest",
-        maxPlayers: 8,
+        maxPlayers: 16,
         password: "",
         theme: this.theme,
         player: characterPayload(),
+        session: account.token,
       });
       this.toast(`You lit a new fire — code ${data.code}`, "good");
       this._enterRoom(data);
     } catch (error) {
       this.toast(error.message, "bad");
       this.audio.error();
+      if (error.status === 401) {
+        forget();
+        this.auth.paintChip();
+        this.auth.open({ reason: error.message });
+      }
     } finally {
       this.busy = false;
     }

@@ -64,6 +64,19 @@ export class GtaHud {
 
     this.map = null;
     this.wanted = 0;
+    // How much ground the radar shows around the player, in metres.
+    this.zoomLevels = [120, 200, 300];
+    this.zoomIndex = 1;
+    this.radarWrap = this.root.querySelector(".gta-radar-wrap");
+    if (this.radarWrap) {
+      this.radarWrap.title = "Radar zoom (Z)";
+      this.radarWrap.addEventListener("click", () => this.cycleZoom());
+    }
+  }
+
+  cycleZoom() {
+    this.zoomIndex = (this.zoomIndex + 1) % this.zoomLevels.length;
+    return this.zoomLevels[this.zoomIndex];
   }
 
   setMap(radarData) {
@@ -110,6 +123,7 @@ export class GtaHud {
 
     this._drawWanted(state.wanted || 0);
     this._drawRadar(x, z, heading, state.location || "");
+    if (state.prompt) this.setHint(state.prompt);
     this.vehicleEl.classList.toggle("on", Boolean(inVehicle));
     if (inVehicle) {
       this._drawSpeedo(state);
@@ -140,7 +154,7 @@ export class GtaHud {
     const ctx = this.radarCtx;
     const size = this.radar.width;
     const center = size / 2;
-    const scale = 1.35;
+    const scale = (center - 8) / this.zoomLevels[this.zoomIndex];
     ctx.clearRect(0, 0, size, size);
 
     ctx.save();
@@ -186,8 +200,8 @@ export class GtaHud {
         ctx.stroke();
       }
       // Centre line of the boulevard.
-      const a = project(-120, 0);
-      const b = project(120, 0);
+      const a = project(-180, 0);
+      const b = project(180, 0);
       ctx.strokeStyle = "rgba(240,210,120,0.4)";
       ctx.lineWidth = 1.4;
       ctx.beginPath();

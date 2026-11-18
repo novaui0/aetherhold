@@ -6,7 +6,7 @@
 // read as a car rather than a painted box.
 
 import * as THREE from "../vendor/three.module.js";
-import { lathe, roundedBox, tube, extrudeProfile, signTexture, kitMaterials } from "./render/kit.js";
+import { addMesh, lathe, roundedBox, tube, extrudeProfile, signTexture, kitMaterials } from "./render/kit.js";
 
 const materials = kitMaterials;
 
@@ -367,6 +367,75 @@ export function spinWheels(vehicle, distance, steerAngle = 0) {
     wheel.spin.rotation.x += distance / Math.max(0.1, wheel.radius);
     if (wheel.front) wheel.pivot.rotation.y = steerAngle;
   }
+}
+
+export function createMotorcycle(options = {}) {
+  const M = materials();
+  const color = options.color || "#c9a227";
+  const paint = M.carPaint(color);
+  const bike = new THREE.Group();
+  bike.name = "motorcycle";
+  const radius = 0.33;
+
+  const wheel = (z) => {
+    const tyre = new THREE.Mesh(lathe([
+      [radius * 0.55, -0.07], [radius * 0.9, -0.07], [radius, 0],
+      [radius * 0.9, 0.07], [radius * 0.55, 0.07],
+    ], 22, { crease: Math.PI / 2.6 }), M.rubber);
+    tyre.rotation.z = Math.PI / 2;
+    tyre.position.set(0, radius, z);
+    tyre.castShadow = true;
+    bike.add(tyre);
+    const rim = new THREE.Mesh(lathe([
+      [0, -0.05], [radius * 0.55, -0.05], [radius * 0.58, 0], [radius * 0.55, 0.05], [0, 0.05],
+    ], 18), M.steel);
+    rim.rotation.z = Math.PI / 2;
+    rim.position.set(0, radius, z);
+    bike.add(rim);
+    const fork = new THREE.Mesh(roundedBox(0.05, 0.72, 0.05, 0.02), M.chrome);
+    fork.position.set(0, radius + 0.36, z + (z > 0 ? -0.1 : 0.1));
+    fork.rotation.x = z > 0 ? -0.28 : 0.2;
+    bike.add(fork);
+    return tyre;
+  };
+  wheel(0.72);
+  wheel(-0.7);
+
+  // Frame, tank, seat, engine and pipes.
+  addMesh(bike, roundedBox(0.16, 0.16, 1.2, 0.06), M.iron, [0, 0.62, 0], [0.08, 0, 0]);
+  addMesh(bike, roundedBox(0.34, 0.3, 0.52, 0.1), paint, [0, 0.82, 0.14], [0.12, 0, 0]);
+  addMesh(bike, roundedBox(0.3, 0.12, 0.6, 0.08), M.leather, [0, 0.9, -0.35]);
+  addMesh(bike, roundedBox(0.34, 0.26, 0.3, 0.08), M.brushed, [0, 0.52, -0.05]);
+  addMesh(bike, tube([
+    [-0.14, 0.45, -0.2], [-0.2, 0.42, -0.7], [-0.24, 0.4, -1.05],
+  ], 0.035, { segments: 8, radial: 6 }), M.chrome);
+  addMesh(bike, tube([
+    [0.14, 0.45, -0.2], [0.2, 0.42, -0.7], [0.24, 0.4, -1.05],
+  ], 0.035, { segments: 8, radial: 6 }), M.chrome);
+  const bar = new THREE.Mesh(roundedBox(0.62, 0.04, 0.05, 0.02), M.chrome);
+  bar.position.set(0, 1.02, 0.52);
+  bike.add(bar);
+  addMesh(bike, roundedBox(0.3, 0.18, 0.12, 0.05), M.darkTrim, [0, 1.06, 0.6]);
+  addMesh(bike, roundedBox(0.2, 0.12, 0.06, 0.03), M.headLight, [0, 0.96, 0.72]);
+  addMesh(bike, roundedBox(0.15, 0.08, 0.05, 0.02), M.tailLight, [0, 0.78, -0.86]);
+
+  if (options.rider !== false) {
+    const rider = new THREE.Group();
+    rider.position.set(0, 0.92, -0.2);
+    bike.add(rider);
+    addMesh(rider, roundedBox(0.38, 0.56, 0.25, 0.1), M.leather, [0, 0.3, 0], [-0.25, 0, 0]);
+    addMesh(rider, new THREE.SphereGeometry(0.17, 14, 10), M.darkTrim, [0, 0.68, 0.06]);
+    addMesh(rider, roundedBox(0.28, 0.08, 0.32, 0.04), M.glass, [0, 0.68, 0.16]);
+    [-1, 1].forEach((side) => {
+      addMesh(rider, roundedBox(0.1, 0.42, 0.1, 0.04), M.leather,
+        [side * 0.23, 0.3, 0.14], [0.9, 0, side * 0.15]);
+      addMesh(rider, roundedBox(0.12, 0.42, 0.12, 0.04), M.denim || M.leather,
+        [side * 0.13, -0.06, 0.18], [1.1, 0, 0]);
+    });
+  }
+  bike.userData.type = "motorcycle";
+  bike.userData.wheels = [];
+  return bike;
 }
 
 export function carForSale(color) {

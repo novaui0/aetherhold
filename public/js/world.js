@@ -115,6 +115,8 @@ export class World {
     this.keys = new Set();
     // Kol girdileri ayrı tutulur: klavyenin keyup'ı kolun basılı tuşunu silmesin.
     this.padKeys = new Set();
+    // Dokunmatik joystick aynı kurala uyar: kendi kümesi, aynı hareket hattı.
+    this.touchKeys = new Set();
     this.yaw = Math.PI;
     this.pitch = 0.22;
     this.viewPitch = 0;
@@ -142,6 +144,10 @@ export class World {
     this._fpsTime = 0;
     this._disposables = [];
     this._chatCooldown = 0;
+    // "city" | "interior" | "raid": controls which avatars are drawn and
+    // where the movement clamp applies.
+    this.zone = "city";
+    this.raid = null;
     this.inVehicle = false;
     this.vehicle = {
       model: "comet", fuel: 62, tank: 62, condition: 100, capacity: 180, cargoKg: 0,
@@ -154,6 +160,8 @@ export class World {
     this.onNotice = null;
     this.onNpc = null;
     this.onPrompt = null;
+    this.onDoor = null;
+    this.nearDoorName = "";
     this._hudTimer = 0;
 
     this._initRenderer();
@@ -187,6 +195,14 @@ export class World {
     this.phoneUI = null;
     this.inventoryUI = null;
     this.loadScreen = null;
+    // Server-owned sheet, mirrored for the HUD and the raid gate.
+    this.profile = null;
+    this.raid = null;
+    this.onAttack = null;
+    this.onRaidExit = null;
+    this.onPlayerDown = null;
+    this._attackTimer = 0;
+    this._lastDamageAt = 0;
 
     this._bindInput();
   }
@@ -214,6 +230,17 @@ export class World {
 
     const { LoadScreen } = await import("./loadscreen.js");
     this.loadScreen = new LoadScreen(this);
+
+    // The five-band arena lives outside the city grid and is only revealed
+    // while the player is inside it.
+    const { RaidArena } = await import("./raid.js");
+    this.raid = new RaidArena(this.scene, {
+      onPlayerHit: (damage, name) => this._hurtInRaid(damage, name),
+    });
+  }
+
+  setProfile(profile) {
+    this.profile = profile || null;
   }
 
   // ── setup ────────────────────────────────────────────────────────────
@@ -437,6 +464,19 @@ export class World {
     for (const player of list) {
       seen.add(player.id);
       let record = this.players.get(player.id);
+      const otherZone = player.zone || "city";
+      // Interiors and the raid are private spaces: only the city draws other
+      // drivers, and the player themselves stays visible for the camera.
+      const visible = player.id === this.selfId
+        ? true
+        : this.zone === "city" && otherZone === "city";
+      if (!visible) {
+        if (record) {
+          record.group.visible = false;
+          if (record.label) record.label.visible = false;
+        }
+        continue;
+      }
       // Cosmetics travel inside the sheet; without this flattening every other
       // driver rendered with the default face and skin.
       const appearance = player.sheet ? { ...player, ...player.sheet } : player;
@@ -482,6 +522,7 @@ export class World {
           this._replaceAvatar(record, appearance);
         }
       }
+      record.group.visible = true;
       if (record.label) record.label.visible = this.settings.nameplates && player.id !== this.selfId;
     }
 
@@ -631,24 +672,31 @@ export class World {
     if (this.region?.inside) {
       const door = this.region.nearInteriorExit(this.position.x, this.position.z);
       if (door) {
+        const name = this.region.interior?.name || "the street";
         const outside = this.region.exitInterior();
+        this.zone = "city";
         this.position.set(outside.x, 0, outside.z);
-        this.velocity.set(0, 0, 0);
-        if (this.onNotice) this.onNotice("Back on the street", "");
-      } else if (this.onNotice) {
-        this.onNotice("The exit is by the door on the far wall", "");
-      }
-      return true;
-    }
-    const apartment = this.region?.nearInteriorEntrance(this.position.x, this.position.z);
-    if (apartment) {
-      const spawn = this.region.enterInterior();
-      if (spawn) {
-        this.position.set(spawn.x, 0, spawn.z);
         this.velocity.set(0, 0, 0);
         this.yaw = Math.PI;
         this.facing = 0;
-        if (this.onNotice) this.onNotice("Apartment 4B — press E at the door to leave", "good");
+        if (this.onDoor) this.onDoor({ leaving: true, name });
+        if (this.onNotice) this.onNotice("Back on the street", "");
+      } else if (this.onNotice) {
+        this.onNotice("The exit is by the door on the near wall", "");
+      }
+      return true;
+    }
+    const door = this.region?.nearDoor(this.position.x, this.position.z);
+    if (door) {
+      const spawn = this.region.enterBuilding(door.id);
+      if (spawn) {
+        this.zone = "interior";
+        this.position.set(spawn.x, 0, spawn.z);
+        this.velocity.set(0, 0, 0);
+        this.yaw = 0;
+        this.facing = Math.PI;
+        if (this.onDoor) this.onDoor({ entering: true, name: door.name, kind: door.template });
+        if (this.onNotice) this.onNotice(`${door.name} — press E at the door to leave`, "good");
         return true;
       }
     }
@@ -850,6 +898,9 @@ export class World {
   }
 
   _resolveCollision(previousX, previousZ, isVehicle) {
+    // The city collider has no idea the gate exists; the arena has its own
+    // radial clamp and must not be treated as out-of-bounds city ground.
+    if (this.zone === "raid") return;
     const blocked = this.region?.isBlocked(this.position.x, this.position.z);
     if (!blocked) return;
     this.position.x = previousX;
@@ -865,12 +916,16 @@ export class World {
       look: Number(wrapAngle(this.yaw + Math.PI).toFixed(3)),
       pitch: Number((this.firstPerson ? this.viewPitch : (this.pitch - 0.22) * 1.2).toFixed(3)),
       anim: this.anim,
+      zone: this.zone || "city",
+      weapon: this.weapon || "",
     };
   }
 
-  /** Klavye ya da kol — biri basılıysa hareket sayılır. */
+  /** Klavye, kol ya da dokunmatik joystick — biri basılıysa hareket sayılır. */
   pressed(key) {
-    return this.keys.has(key) || (this.padKeys ? this.padKeys.has(key) : false);
+    return this.keys.has(key)
+      || (this.padKeys ? this.padKeys.has(key) : false)
+      || (this.touchKeys ? this.touchKeys.has(key) : false);
   }
 
   // ── input ────────────────────────────────────────────────────────────
@@ -898,16 +953,23 @@ export class World {
     this._onBlur = () => {
       this.keys.clear();
       this.padKeys?.clear();
+      this.touchKeys?.clear();
       this.pointer.dragging = false;
     };
 
     this._onPointerDown = (event) => {
       if (event.button !== 0 || !this.inputEnabled) return;
-      if (this.locked) return;
+      if (this.locked) {
+        // Pointer-locked, the left button is the weapon. Clicking anywhere in
+        // the gate is a swing; drawing steel is still R.
+        if (this.zone === "raid") this.attack();
+        return;
+      }
       this.pointer.dragging = true;
       this.pointer.lastX = event.clientX;
       this.pointer.lastY = event.clientY;
-      this.requestLook();
+      // A finger has no way to give the mouse back: touch look is drag-only.
+      if (event.pointerType !== "touch") this.requestLook();
       try {
         this.canvas.setPointerCapture?.(event.pointerId);
       } catch {
@@ -983,8 +1045,108 @@ export class World {
     if (document.pointerLockElement === this.canvas) document.exitPointerLock?.();
   }
 
+  // ── the gate ────────────────────────────────────────────────────────
+  enterRaid(band = 1) {
+    if (!this.raid) return null;
+    if (this.inVehicle) this.exitVehicle();
+    if (this.region?.inside) {
+      this.region.exitInterior();
+      this.region.inside = false;
+    }
+    const info = this.raid.enter(band);
+    this.zone = "raid";
+    this.position.set(info.spawn.x, 0, info.spawn.z);
+    this.velocity.set(0, 0, 0);
+    this.yaw = Math.PI;
+    this.facing = 0;
+    this.weapon = "";
+    this.hud?.setMap?.({ roads: [], blocks: [], blips: [] });
+    return info;
+  }
+
+  leaveRaid({ silent = false } = {}) {
+    if (this.zone !== "raid") return false;
+    this.raid?.leave();
+    this.zone = "city";
+    this.position.set(-8, 0, 8);
+    this.velocity.set(0, 0, 0);
+    this.facing = Math.PI / 2;
+    this.yaw = -Math.PI / 2;
+    this.hud?.setMap?.(this.region?.radarData?.() || null);
+    this.stats.health = Math.max(35, this.stats.health);
+    if (!silent) this.onNotice?.(`Back through the gate${this.profile ? ` · band ${this.profile.band}/5` : ""}`, "");
+    this.onRaidExit?.();
+    return true;
+  }
+
+  /**
+   * Warp the driver to a map coordinate. Used by /tp; the next sync carries
+   * the new position to the host, so other drivers see the arrival.
+   */
+  warpTo(x, z, { heading = null } = {}) {
+    const targetX = Number(x);
+    const targetZ = Number(z);
+    if (!Number.isFinite(targetX) || !Number.isFinite(targetZ)) return false;
+    if (this.inVehicle) this.exitVehicle();
+    if (this.region?.inside) {
+      this.region.exitInterior();
+      this.zone = "city";
+      this.hud?.setMap?.(this.region?.radarData?.() || null);
+    }
+    if (this.zone === "raid") {
+      // The arena owns its own ring; leaving it is a job for the gate.
+      return false;
+    }
+    const spot = this.region?.clamp ? this.region.clamp(targetX, targetZ) : { x: targetX, z: targetZ };
+    this.position.set(spot.x, 0, spot.z);
+    this.velocity.set(0, 0, 0);
+    this.pointer.dragging = false;
+    if (Number.isFinite(heading)) {
+      this.facing = heading;
+      this.yaw = wrapAngle(heading + Math.PI);
+    }
+    return true;
+  }
+
+  attack() {
+    if (this.zone !== "raid" || !this.raid?.active) return false;
+    if (this._attackTimer > 0) return false;
+    if (!this.weapon) {
+      this.onNotice?.("Draw a weapon first — R", "bad");
+      return false;
+    }
+    const weapon = this.profile?.weapon || { range: 2.4, rate: 0.45 };
+    const distance = this.raid.distanceTo(this.position.x, this.position.z);
+    this._attackTimer = Math.max(0.18, Number(weapon.rate) || 0.45);
+    // The swing happens whether or not the target is in reach; the server, not
+    // the client, decides what the hit is worth.
+    if (distance > Number(weapon.range || 2.4) + 1.2) {
+      this.onNotice?.("Out of reach — close the distance", "bad");
+      return false;
+    }
+    this.onAttack?.({ distance, range: Number(weapon.range) || 2.4 });
+    return true;
+  }
+
+  _hurtInRaid(damage, name = "The boss") {
+    if (this.zone !== "raid") return;
+    this.stats.health = Math.max(0, this.stats.health - Math.max(1, Math.round(damage)));
+    this._lastDamageAt = this.clock.elapsedTime;
+    this.onNotice?.(`${name} hits you — ${Math.round(this.stats.health)} health`, "bad");
+    if (this.stats.health <= 0) {
+      this.stats.health = 40;
+      this.leaveRaid({ silent: true });
+      this.onNotice?.("You wake on the street. The gate keeps what it took.", "bad");
+      this.onPlayerDown?.();
+    }
+  }
+
   toggleWeapon() {
-    this.weapon = this.weapon ? "" : "blade";
+    // The drawn silhouette follows the equipped weapon rather than a generic
+    // "blade", so a pistol and a dagger read differently to other players.
+    const equipped = this.profile?.equipped && this.profile.equipped !== "fists"
+      ? this.profile.equipped : "knife";
+    this.weapon = this.weapon ? "" : equipped;
     if (this.onAction) this.onAction(this.weapon ? "draw" : "sheathe");
     return this.weapon;
   }
@@ -1018,14 +1180,18 @@ export class World {
     const speed = Math.abs(this.vehicle.speed);
     const gear = !this.inVehicle ? "" : speed < 0.6 ? "N" : speed < 8 ? "1" : speed < 15 ? "2" : speed < 22 ? "3" : speed < 30 ? "4" : "5";
     const inside = Boolean(this.region?.inside);
+    const roomName = this.region?.interior?.name || "INTERIOR";
     return {
       x: this.position.x, z: this.position.z, heading,
-      speedKmh, inVehicle: this.inVehicle, cash: this.vehicle.cash,
+      speedKmh, inVehicle: this.inVehicle, cash: this.profile?.cash ?? this.vehicle.cash,
       health: this.stats.health, armor: this.stats.armor,
       wanted: this.fearActive ? 2 : 0, gear,
       fuel: (this.vehicle.fuel / Math.max(1, this.vehicle.tank)) * 100,
-      area: inside ? "APARTMENT 4B" : this.areaName,
-      location: inside ? "Apartment 4B" : this.areaName,
+      area: this.zone === "raid" ? "THE LAST GATE" : inside ? roomName : this.areaName,
+      location: this.zone === "raid" ? "The Last Gate" : inside ? roomName : (this.nearDoorName || this.areaName),
+      prompt: this.zone === "raid"
+        ? "Click — strike · R — weapon · B — leave the gate"
+        : this.nearDoorName ? `E — ${this.nearDoorName}` : "",
     };
   }
 
@@ -1132,15 +1298,24 @@ export class World {
       this.position.x += this.velocity.x * dt;
       this.position.z += this.velocity.z * dt;
 
-      if (!this.region?.inside) {
-        const radius = Math.hypot(this.position.x, this.position.z);
-        if (radius > 200) {
-          const scale = 200 / radius;
-          this.position.x *= scale;
-          this.position.z *= scale;
-        }
+      if (!this.region?.inside && this.zone !== "raid") {
+        const edge = this.region?.edge || { x: 118, z: 74 };
+        this.position.x = Math.max(-edge.x, Math.min(edge.x, this.position.x));
+        this.position.z = Math.max(-edge.z, Math.min(edge.z, this.position.z));
       }
       this._resolveCollision(previousX, previousZ, false);
+
+      if (this.zone === "raid" && this.raid) {
+        const center = this.raid.center;
+        const dx = this.position.x - center.x;
+        const dz = this.position.z - center.z;
+        const distance = Math.hypot(dx, dz);
+        const limit = center.radius - 1.6;
+        if (distance > limit) {
+          this.position.x = center.x + (dx / distance) * limit;
+          this.position.z = center.z + (dz / distance) * limit;
+        }
+      }
     }
 
     // Keep the shadow cascade over whoever we are looking at, so the truck and
@@ -1150,6 +1325,11 @@ export class World {
     this.sun.position.set(focus.x - 22, 38, focus.z + 16);
     this.sun.target.updateMatrixWorld();
     if (this.region) this.region.update(dt, elapsed);
+    if (this._attackTimer > 0) this._attackTimer = Math.max(0, this._attackTimer - dt);
+    if (this.raid?.active) this.raid.update(dt, elapsed, this.position);
+    if (this.zone === "city" && this.stats.health < 100 && elapsed - this._lastDamageAt > 7) {
+      this.stats.health = Math.min(100, this.stats.health + dt * 1.6);
+    }
 
     if (this.emoteTime > 0) this.emoteTime = Math.max(0, this.emoteTime - dt);
 
@@ -1183,11 +1363,15 @@ export class World {
         this.phoneUI._refreshNotifications();
       }
     }
-    if (!this.region?.inside) {
+    if (this.zone === "city") {
       const streets = this.region?.radarData?.()?.streets;
       if (Math.abs(this.position.z) < 20) this.areaName = streets ? streets.avenue : "VINEWOOD";
       else if (Math.abs(this.position.x) < 20) this.areaName = "DOWNTOWN";
       else this.areaName = this.region?.nearestSite(this.position.x, this.position.z, 46)?.label || "ELGIN DISTRICT";
+      const near = this.region?.nearDoor(this.position.x, this.position.z);
+      this.nearDoorName = near?.name || "";
+    } else {
+      this.nearDoorName = "";
     }
     this._hudFrame = (this._hudFrame || 0) + dt;
     if (this._hudFrame >= 0.033) {
@@ -1445,8 +1629,11 @@ export class World {
     this.postfx = null;
     this.hud?.destroy();
     this.hud = null;
+    this.raid?.dispose();
+    this.raid = null;
     this.region?.disposes?.();
-    kitMaterials().disposeAll();
+    // kitMaterials() is intentionally session-scoped: disposing it here used
+    // to leave every later district with dead car paint and sign textures.
     this._disposables.forEach((item) => item?.dispose?.());
     this.renderer.dispose();
   }

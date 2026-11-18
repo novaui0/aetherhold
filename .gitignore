@@ -12,3 +12,10 @@ __pycache__/
 
 # tooling scratch
 .tmp_i18n/
+
+# test scratch
+_auth_api_test.py
+_profile_api_test.py
+_final.db*
+_profile_test.db*
+_server_test.pid

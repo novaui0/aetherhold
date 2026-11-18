@@ -20,6 +20,7 @@ Pure standard library: no pip install required.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import importlib.util
 import ipaddress
@@ -48,7 +49,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
 DEFAULT_BANS_FILE = os.path.join(BASE_DIR, "bans.json")
 
-MAX_PLAYERS_LIMIT = 16
+MAX_PLAYERS_LIMIT = 32
+# Rooms open with a healthy crowd by default; the ceiling stays higher so a
+# bigger box can raise it with --max-players.
+DEFAULT_ROOM_SLOTS = 16
 MESSAGE_HISTORY = 250
 PLAYER_TIMEOUT = 15.0        # seconds without a sync before a player is dropped
 ROOM_IDLE_TIMEOUT = 60 * 30  # empty room is reclaimed after this long
@@ -65,6 +69,11 @@ CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 DICE_RE = re.compile(r"^/(?:r|roll)\s+(\d{0,2})\s*d\s*(\d{1,3})\s*(?:([+-])\s*(\d{1,3}))?$", re.IGNORECASE)
 SAFE_ID = re.compile(r"[^A-Za-z0-9_.:-]")
+USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,19}$")
+PASSWORD_MIN = 6
+PASSWORD_MAX = 128
+PBKDF2_ROUNDS = 200_000
+ACCOUNT_SESSION_TTL = 60 * 60 * 24 * 30   # a month of "stay signed in"
 
 # --------------------------------------------------------------------------- #
 # The written rules of the realm
@@ -220,6 +229,8 @@ CODEX = {
         {"cmd": "/sheathe", "body": "Put the weapon away and let the room breathe."},
         {"cmd": "/fear <reaction>", "body": "Answer a drawn weapon in character."},
         {"cmd": "/look <name>", "body": "Study someone's public character sheet."},
+        {"cmd": "/tp <driver|place|boss>", "body": "Warp to a driver, a district stop, or straight into the boss gate."},
+        {"cmd": "/tp <x> <z>", "body": "Warp to map coordinates — /tp spawn returns to the plaza."},
         {"cmd": "/who", "body": "Who is present, and what they carry."},
         {"cmd": "/rules", "body": "A short reminder of the Codex."},
         {"cmd": "/help", "body": "All commands."},
@@ -270,7 +281,7 @@ TEXT = {
         "default_hint": "press Enter for the default",
         "choose": "Choose",
         "invalid": "Not a valid choice",
-        "slots_hint": "2–16 players",
+        "slots_hint": "2–32 players",
         "db_hint": "SQLite file for fleet, cargo and discoveries",
         "language_set": "Language set to English.",
     },
@@ -289,7 +300,7 @@ TEXT = {
         "default_hint": "varsayılan için Enter'a basın",
         "choose": "Seçin",
         "invalid": "Geçersiz seçim",
-        "slots_hint": "2–16 oyuncu",
+        "slots_hint": "2–32 oyuncu",
         "db_hint": "Araç, kargo ve keşifler için SQLite dosyası",
         "language_set": "Dil Türkçe olarak ayarlandı.",
     },
@@ -533,8 +544,8 @@ GODMODE_PATTERNS = (
 # --------------------------------------------------------------------------- #
 class Player:
     __slots__ = ("id", "token", "client_id", "name", "cls", "color", "accent", "stats",
-                 "sheet", "pos", "rot", "pitch", "look", "anim", "weapon", "fear_due", "fear_by",
-                 "last_seen", "last_chat", "joined", "ip", "strikes", "recent")
+                 "sheet", "pos", "rot", "pitch", "look", "anim", "weapon", "zone", "fear_due", "fear_by",
+                 "last_seen", "last_chat", "joined", "ip", "strikes", "recent", "profile")
 
     def __init__(self, name: str, cls: str, color: str, accent: str, stats: dict,
                  sheet: dict, client_id: str, ip: str):
@@ -553,6 +564,10 @@ class Player:
         self.look = 0.0
         self.anim = "idle"
         self.weapon = ""
+        self.zone = "city"
+        # Loaded per client id so gear, cash and boss progress survive a
+        # reconncet even when the room itself is brand new.
+        self.profile = get_profile(client_id)
         self.fear_due = 0.0
         self.fear_by = ""
         self.last_seen = time.time()
@@ -577,6 +592,7 @@ class Player:
             "look": round(self.look, 3),
             "anim": self.anim,
             "weapon": self.weapon,
+            "zone": self.zone,
         }
 
     def fear_state(self) -> dict:
@@ -715,7 +731,7 @@ SERVER_CONFIG = {
     "language": "en",
     "region": "turkey",
     "name": "",
-    "slots": 8,
+    "slots": 32,
     "modules": ["vehicles", "logistics", "world"],
     "db": os.path.join(BASE_DIR, "aetherhold.db"),
 }
@@ -758,13 +774,17 @@ class ModContext:
         self.rooms = rooms if rooms is not None else ROOMS
         self.data = mod.data
 
-    def broadcast(self, text: str, kind: str = "system", detail: str = ""):
+    def broadcast(self, text: str, kind: str = "system", detail: str = "",
+                  to: str | None = None):
         if not self.room:
             return None
-        return self.room.broadcast({
+        message = {
             "kind": kind, "from": None, "text": text,
             "detail": detail, "mod": self.mod.name,
-        })
+        }
+        if to:
+            message["to"] = to
+        return self.room.broadcast(message)
 
     def reply(self, text: str, kind: str = "system", detail: str = ""):
         if not self.room or not self.player:
@@ -774,14 +794,23 @@ class ModContext:
             "detail": detail, "to": self.player.id, "mod": self.mod.name,
         })
 
-    def title(self, title: str, sub: str = ""):
-        """Big centre-screen title + subtitle for everyone in the room."""
-        return self.broadcast(title, kind="title", detail=sub)
+    def title(self, title: str, sub: str = "", to: str | None = None):
+        """Big centre-screen title + subtitle (room-wide, or just `to`)."""
+        return self.broadcast(title, kind="title", detail=sub, to=to)
 
-    def bar(self, text: str, fraction: float = 0.5):
-        """Boss-bar strip across the top of the screen."""
+    def bar(self, text: str, fraction: float = 0.5, to: str | None = None):
+        """Boss-bar strip across the top of the screen (room-wide, or `to`)."""
         value = max(0.0, min(1.0, float(fraction)))
-        return self.broadcast(text, kind="bar", detail=f"{value:.3f}")
+        return self.broadcast(text, kind="bar", detail=f"{value:.3f}", to=to)
+
+    def welcome(self, name: str, tagline: str = ""):
+        """Private arrival card: only the joining player's client sees it."""
+        if not self.room or not self.player:
+            return None
+        return self.room.broadcast({
+            "kind": "welcome", "from": None, "text": name,
+            "detail": tagline, "to": self.player.id, "mod": self.mod.name,
+        })
 
 
 class Mod:
@@ -1034,12 +1063,47 @@ def init_db(path: str) -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )""")
+        DB.execute("""
+            CREATE TABLE IF NOT EXISTS profiles (
+                client_id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                updated REAL NOT NULL
+            )""")
+        # Accounts own the profile and fleet rows: the client id handed to the
+        # game is the account id, so gear and boss bands follow the login.
+        DB.execute("""
+            CREATE TABLE IF NOT EXISTS accounts (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                pass_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                created REAL NOT NULL,
+                last_login REAL NOT NULL
+            )""")
+        DB.execute("CREATE UNIQUE INDEX IF NOT EXISTS accounts_name ON accounts (lower(username))")
+        DB.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                created REAL NOT NULL,
+                seen REAL NOT NULL
+            )""")
+        DB.execute("CREATE INDEX IF NOT EXISTS sessions_owner ON sessions (account_id)")
+        # The driver sheet (name, calling, face, history) follows the account so
+        # signing in on another device brings the same person back.
+        DB.execute("""
+            CREATE TABLE IF NOT EXISTS characters (
+                client_id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                updated REAL NOT NULL
+            )""")
         DB.execute("INSERT OR REPLACE INTO world_meta (key, value) VALUES (?, ?)",
                    ("world_version", VERSION))
         DB.execute("INSERT OR REPLACE INTO world_meta (key, value) VALUES (?, ?)",
                    ("region", SERVER_CONFIG["region"]))
         DB.commit()
     load_fleet()
+    load_profiles()
 
 
 def load_fleet() -> None:
@@ -1207,6 +1271,7 @@ def fleet_travel(fleet: dict, target: str) -> dict:
     fleet["odometer"] = round(fleet.get("odometer", 0.0) + road["km"], 2)
     fleet["condition"] = round(max(0.0, fleet.get("condition", 100) - road["km"] * 0.006), 2)
     fleet["node"] = target
+    fleet["trips"] = int(fleet.get("trips", 0)) + 1
     fleet["pos"] = [0.0, 0.0, 0.0]
     fleet["heading"] = 0.0
     discovered = [target]
@@ -1214,6 +1279,10 @@ def fleet_travel(fleet: dict, target: str) -> dict:
         if _discover(fleet, neighbour):
             discovered.append(neighbour)
     save_fleet(fleet)
+    profile = get_profile(str(fleet.get("clientId") or ""))
+    if profile:
+        profile["stats"]["trips"] = int(profile["stats"].get("trips", 0)) + 1
+        mark_profile_dirty(profile["clientId"])
     return {"fleet": fleet_public(fleet), "road": road,
             "spent": need, "discovered": discovered}
 
@@ -1375,6 +1444,549 @@ def fleet_action(client_id: str, body: dict) -> dict:
         return {"fleet": fleet_public(fleet), "cost": cost}
 
     raise ApiError(404, "Unknown fleet action")
+
+
+# --------------------------------------------------------------------------- #
+# Player profile: gear, cash, contracts and the five-band boss run
+# --------------------------------------------------------------------------- #
+# Every entry is server-owned so a client can never invent a weapon or a
+# payout. The browser mirrors this catalogue for icons and shop copy only.
+ITEMS = {
+    "fists": {"name": "Bare hands", "category": "weapon", "price": 0, "damage": 5,
+              "range": 2.0, "rate": 0.55, "icon": "✊", "ammo": False,
+              "desc": "Better than nothing, barely."},
+    "knife": {"name": "Dagger", "category": "weapon", "price": 90, "damage": 15,
+              "range": 2.4, "rate": 0.45, "icon": "🔪", "ammo": False,
+              "desc": "Close, quiet, always on the belt."},
+    "pistol": {"name": "Pistol", "category": "weapon", "price": 480, "damage": 22,
+               "range": 20.0, "rate": 0.38, "icon": "🔫", "ammo": True,
+               "desc": "A reliable sidearm for the wrong side of town."},
+    "shotgun": {"name": "Shotgun", "category": "weapon", "price": 1150, "damage": 44,
+                "range": 10.0, "rate": 0.92, "icon": "💥", "ammo": True,
+                "desc": "Persuasion, in twelve-gauge."},
+    "carbine": {"name": "Carbine", "category": "weapon", "price": 1680, "damage": 30,
+                "range": 34.0, "rate": 0.26, "icon": "🎯", "ammo": True,
+                "desc": "The band bosses stop laughing at this one."},
+    "ammo": {"name": "Ammo box", "category": "attach", "price": 28, "icon": "🧨",
+             "stack": 120, "desc": "Twelve rounds. One band, maybe."},
+    "medkit": {"name": "Medkit", "category": "food", "price": 140, "heal": 45,
+               "icon": "🩹", "stack": 5, "desc": "Stops the bleeding long enough to run."},
+    "burger": {"name": "Lonom Burger", "category": "food", "price": 32, "heal": 14,
+               "icon": "🍔", "stack": 9, "desc": "Warm, greasy, technically food."},
+    "water": {"name": "Water bottle", "category": "drink", "price": 12, "heal": 7,
+              "icon": "💧", "stack": 9, "desc": "The city is always thirsty."},
+    "scrap": {"name": "Steel scrap", "category": "metals", "price": 18,
+              "icon": "⚙️", "stack": 40, "desc": "Sold by the kilo at the counter."},
+    "leather": {"name": "Leather strap", "category": "textile", "price": 14,
+                "icon": "🪢", "stack": 40, "desc": "Tanned, worn soft, still useful."},
+    "id_card": {"name": "Aetherhold ID", "category": "documents", "price": 0,
+                "icon": "🪪", "stack": 1, "desc": "Your name, your face, your problem."},
+    "trophy": {"name": "Pale Warden's signet", "category": "misc", "price": 0,
+               "icon": "💠", "stack": 1, "desc": "Proof the fifth band fell to you."},
+}
+
+SHOP_STOCK = ["pistol", "shotgun", "carbine", "ammo", "medkit", "burger", "water"]
+
+BOSS_BANDS = [
+    {"name": "The Rat King", "place": "Band I — The Drowned Docks", "hp": 320,
+     "cash": 320, "xp": 70, "color": "#8fd0b0", "loot": [("scrap", 4)]},
+    {"name": "Marrow Jack", "place": "Band II — Slaughter Row", "hp": 560,
+     "cash": 520, "xp": 110, "color": "#ffab7a", "loot": [("leather", 3), ("medkit", 1)]},
+    {"name": "The Hollow Choir", "place": "Band III — The Silent Chapel", "hp": 820,
+     "cash": 780, "xp": 160, "color": "#b9a2ff", "loot": [("ammo", 36)]},
+    {"name": "Iron Widow", "place": "Band IV — Foundry Nine", "hp": 1150,
+     "cash": 1150, "xp": 230, "color": "#ff8f8f", "loot": [("carbine", 1), ("ammo", 24)]},
+    {"name": "The Pale Warden", "place": "Band V — The Last Gate", "hp": 1600,
+     "cash": 1900, "xp": 380, "color": "#f2e6c9", "loot": [("trophy", 1), ("medkit", 2)]},
+]
+
+CONTRACTS = {
+    "patrol": {"title": "Street sweep", "kind": "patrol", "goal": 240, "unit": "m",
+               "reward": 190, "xp": 35,
+               "brief": "Walk the Elgin blocks until the watch log fills. Boots, not bullets."},
+    "shift": {"title": "Dockside shift", "kind": "shift", "goal": 180, "unit": "s",
+              "reward": 260, "xp": 40,
+              "brief": "Clock in on the street and stay on duty for three minutes."},
+    "haul": {"title": "Run the line", "kind": "haul", "goal": 1, "unit": "trip",
+             "reward": 430, "xp": 70,
+             "brief": "Take the truck one stop down the map. The cargo will not move itself."},
+    "hunt": {"title": "Band hunt", "kind": "hunt", "goal": 1, "unit": "kill",
+             "reward": 560, "xp": 95,
+             "brief": "Break a band boss in the gate below the city. Loot is yours."},
+}
+
+PROFILES: dict[str, dict] = {}
+PROFILE_DIRTY: set[str] = set()
+PROFILE_LOCK = threading.RLock()
+TRADES: dict[str, dict] = {}
+TRADES_LOCK = threading.RLock()
+
+
+def default_profile(client_id: str) -> dict:
+    region_key = SERVER_CONFIG.get("region") or "turkey"
+    region = REGIONS.get(region_key, REGIONS["turkey"])
+    return {
+        "clientId": client_id,
+        "cash": 420.0,
+        "xp": 0,
+        "kills": 0,
+        "contractsDone": 0,
+        "band": 1,
+        "boss": {"band": 0, "hp": 0, "maxHp": 0, "active": False,
+                 "lastHit": 0.0, "starts": 0},
+        "equipped": "knife",
+        "items": [
+            {"key": "knife", "qty": 1},
+            {"key": "ammo", "qty": 24},
+            {"key": "burger", "qty": 2},
+            {"key": "water", "qty": 2},
+            {"key": "id_card", "qty": 1},
+        ],
+        "contract": None,
+        "stats": {"walked": 0.0, "trips": 0, "kills": 0, "seconds": 0.0},
+        "region": region["key"],
+        "currency": region["currency"],
+        "updated": time.time(),
+    }
+
+
+def _ensure_profile(profile: dict) -> dict:
+    base = default_profile(profile.get("clientId", ""))
+    for key, value in base.items():
+        profile.setdefault(key, value)
+    profile.setdefault("stats", {})
+    for key, value in base["stats"].items():
+        profile["stats"].setdefault(key, value)
+    if not isinstance(profile.get("items"), list):
+        profile["items"] = base["items"]
+    if not isinstance(profile.get("boss"), dict):
+        profile["boss"] = base["boss"]
+    profile["band"] = max(1, min(len(BOSS_BANDS), int(profile.get("band") or 1)))
+    return profile
+
+
+def get_profile(client_id: str) -> dict | None:
+    client_id = str(client_id or "")[:64]
+    if not client_id:
+        return None
+    with PROFILE_LOCK:
+        profile = PROFILES.get(client_id)
+        if profile is None:
+            profile = default_profile(client_id)
+            PROFILES[client_id] = profile
+            PROFILE_DIRTY.add(client_id)
+        return _ensure_profile(profile)
+
+
+def load_profiles() -> None:
+    PROFILES.clear()
+    if DB is None:
+        return
+    with DB_LOCK:
+        rows = DB.execute("SELECT client_id, data FROM profiles").fetchall()
+    for row in rows:
+        try:
+            data = json.loads(row["data"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("clientId"):
+            PROFILES[row["client_id"]] = _ensure_profile(data)
+
+
+def mark_profile_dirty(client_id: str) -> None:
+    if client_id:
+        with PROFILE_LOCK:
+            PROFILE_DIRTY.add(client_id)
+
+
+def save_profile(profile: dict) -> None:
+    if not isinstance(profile, dict) or not profile.get("clientId"):
+        return
+    profile["updated"] = time.time()
+    client_id = profile["clientId"]
+    with PROFILE_LOCK:
+        PROFILES[client_id] = profile
+        PROFILE_DIRTY.discard(client_id)
+        if DB is not None:
+            try:
+                with DB_LOCK:
+                    DB.execute(
+                        "INSERT INTO profiles (client_id, data, updated) VALUES (?, ?, ?) "
+                        "ON CONFLICT(client_id) DO UPDATE SET data = excluded.data, updated = excluded.updated",
+                        (client_id, json.dumps(profile), profile["updated"]),
+                    )
+                    DB.commit()
+            except sqlite3.Error as exc:
+                log_event("warn", "Profile write failed", str(exc))
+
+
+def flush_profiles() -> None:
+    with PROFILE_LOCK:
+        dirty = [(cid, PROFILES.get(cid)) for cid in list(PROFILE_DIRTY)]
+    for cid, profile in dirty:
+        if profile is not None:
+            save_profile(profile)
+
+
+# --------------------------------------------------------------------------- #
+# Accounts — sign-up, sign-in and server-held sessions
+#
+# The password is never stored: pbkdf2-hmac-sha256 with a random per-account
+# salt. A signed-in session token is what the client sends when joining a room,
+# and the server uses the account id as the game's client id, so cash, gear,
+# contracts and boss bands are owned by the account rather than the browser.
+# --------------------------------------------------------------------------- #
+LOGIN_FAILS: dict[str, deque] = {}
+LOGIN_LOCK = threading.RLock()
+LOGIN_WINDOW = 300.0
+LOGIN_BURST = 8
+
+
+def _hash_password(password: str, salt: bytes) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ROUNDS).hex()
+
+
+def _account_guard(ip: str) -> None:
+    """Cheap per-address throttle so a script cannot grind passwords."""
+    now = time.time()
+    with LOGIN_LOCK:
+        bucket = LOGIN_FAILS.setdefault(ip or "?", deque(maxlen=LOGIN_BURST * 2))
+        while bucket and now - bucket[0] > LOGIN_WINDOW:
+            bucket.popleft()
+        if len(bucket) >= LOGIN_BURST:
+            raise ApiError(429, "Too many attempts — wait a few minutes and try again")
+
+
+def _account_failed(ip: str) -> None:
+    with LOGIN_LOCK:
+        LOGIN_FAILS.setdefault(ip or "?", deque(maxlen=LOGIN_BURST * 2)).append(time.time())
+
+
+def _account_clear_fails(ip: str) -> None:
+    with LOGIN_LOCK:
+        LOGIN_FAILS.pop(ip or "?", None)
+
+
+def create_account(username, password, ip: str = "") -> dict:
+    username = str(username or "").strip()
+    password = str(password or "")
+    if not USERNAME_RE.match(username):
+        raise ApiError(400, "Pick a name of 3–20 letters, numbers, _ . or -")
+    if contains_profanity(username):
+        raise ApiError(400, "That name breaks the wardens' law — choose another")
+    if len(password) < PASSWORD_MIN:
+        raise ApiError(400, f"Passwords need at least {PASSWORD_MIN} characters")
+    if len(password) > PASSWORD_MAX:
+        raise ApiError(400, "That password is too long")
+    salt = secrets.token_bytes(16)
+    account_id = uuid.uuid4().hex
+    now = time.time()
+    with DB_LOCK:
+        if DB is None:
+            raise ApiError(503, "This realm has no store for accounts")
+        taken = DB.execute("SELECT id FROM accounts WHERE lower(username) = ?",
+                           (username.lower(),)).fetchone()
+        if taken:
+            raise ApiError(409, "That name is already taken — sign in instead")
+        DB.execute(
+            "INSERT INTO accounts (id, username, pass_hash, salt, created, last_login) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (account_id, username, _hash_password(password, salt), salt.hex(), now, now),
+        )
+        DB.commit()
+    log_event("join", f"Account created: {username}", ip)
+    return {"clientId": account_id, "username": username, "created": now, "lastLogin": now}
+
+
+def authenticate_account(username, password, ip: str = "") -> dict:
+    username = str(username or "").strip()
+    password = str(password or "")
+    row = None
+    with DB_LOCK:
+        if DB is not None:
+            row = DB.execute("SELECT * FROM accounts WHERE lower(username) = ?",
+                             (username.lower(),)).fetchone()
+    wrong = ApiError(401, "No driver by that name — or the password is wrong")
+    if row is None or not username:
+        # Hash anyway so a missing account costs the same time as a wrong one.
+        _hash_password(password, b"\x00" * 16)
+        raise wrong
+    try:
+        salt = bytes.fromhex(str(row["salt"] or ""))
+    except ValueError:
+        salt = b"\x00" * 16
+    if not hmac.compare_digest(str(row["pass_hash"] or ""), _hash_password(password, salt)):
+        raise wrong
+    now = time.time()
+    with DB_LOCK:
+        if DB is not None:
+            DB.execute("UPDATE accounts SET last_login = ? WHERE id = ?", (now, row["id"]))
+            DB.commit()
+    return {"clientId": row["id"], "username": row["username"],
+            "created": float(row["created"] or 0), "lastLogin": now}
+
+
+def issue_session(account_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with DB_LOCK:
+        if DB is None:
+            raise ApiError(503, "This realm has no store for sessions")
+        DB.execute("DELETE FROM sessions WHERE created < ?", (now - ACCOUNT_SESSION_TTL,))
+        DB.execute("INSERT INTO sessions (token, account_id, created, seen) VALUES (?, ?, ?, ?)",
+                   (token, account_id, now, now))
+        DB.commit()
+    return token
+
+
+def session_account(token) -> dict | None:
+    token = str(token or "").strip()[:128]
+    if not token:
+        return None
+    now = time.time()
+    with DB_LOCK:
+        if DB is None:
+            return None
+        row = DB.execute(
+            "SELECT a.id, a.username, a.created, a.last_login, s.created AS issued, s.seen "
+            "FROM sessions s JOIN accounts a ON a.id = s.account_id WHERE s.token = ?",
+            (token,),
+        ).fetchone()
+        if row is None:
+            return None
+        if now - float(row["issued"] or 0) > ACCOUNT_SESSION_TTL:
+            DB.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            DB.commit()
+            return None
+        if now - float(row["seen"] or 0) > 300:
+            DB.execute("UPDATE sessions SET seen = ? WHERE token = ?", (now, token))
+            DB.commit()
+    return {"clientId": row["id"], "username": row["username"],
+            "created": float(row["created"] or 0),
+            "lastLogin": float(row["last_login"] or 0), "token": token}
+
+
+def sanitize_character(raw) -> dict | None:
+    """Whitelist a driver sheet before it is written to the account."""
+    if not isinstance(raw, dict):
+        return None
+    sheet = raw.get("sheet") if isinstance(raw.get("sheet"), dict) else {}
+    cls = raw.get("cls")
+    return {
+        "name": sanitize_name(raw.get("name")),
+        "cls": cls if cls in CLASSES else "Adventurer",
+        "color": sanitize_color(raw.get("color"), "#7dd3fc"),
+        "accent": sanitize_color(raw.get("accent"), "#f0abfc"),
+        "stats": sanitize_stats(raw.get("stats")),
+        "sheet": sanitize_sheet(sheet),
+    }
+
+
+def load_character(client_id: str) -> dict | None:
+    with DB_LOCK:
+        if DB is None:
+            return None
+        row = DB.execute("SELECT data FROM characters WHERE client_id = ?",
+                         (client_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        data = json.loads(row["data"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_character(client_id: str, character: dict) -> None:
+    now = time.time()
+    with DB_LOCK:
+        if DB is None:
+            return
+        DB.execute(
+            "INSERT INTO characters (client_id, data, updated) VALUES (?, ?, ?) "
+            "ON CONFLICT(client_id) DO UPDATE SET data = excluded.data, updated = excluded.updated",
+            (client_id, json.dumps(character), now),
+        )
+        DB.commit()
+
+
+def revoke_session(token) -> None:
+    token = str(token or "").strip()[:128]
+    if not token:
+        return
+    with DB_LOCK:
+        if DB is not None:
+            DB.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            DB.commit()
+
+
+def item_template(key: str) -> dict:
+    return ITEMS.get(key) or ITEMS["fists"]
+
+
+def item_entry(profile: dict, key: str) -> dict | None:
+    for entry in profile.get("items", []):
+        if entry.get("key") == key:
+            return entry
+    return None
+
+
+def item_count(profile: dict, key: str) -> int:
+    entry = item_entry(profile, key)
+    return int(entry.get("qty", 0)) if entry else 0
+
+
+def grant_item(profile: dict, key: str, qty: int = 1) -> None:
+    if key not in ITEMS or qty <= 0:
+        return
+    entry = item_entry(profile, key)
+    if entry:
+        entry["qty"] = int(entry.get("qty", 0)) + qty
+    else:
+        profile.setdefault("items", []).append({"key": key, "qty": qty})
+
+
+def take_item(profile: dict, key: str, qty: int = 1) -> bool:
+    entry = item_entry(profile, key)
+    if not entry or int(entry.get("qty", 0)) < qty:
+        return False
+    entry["qty"] = int(entry["qty"]) - qty
+    if entry["qty"] <= 0:
+        profile["items"] = [item for item in profile["items"] if item is not entry]
+        if profile.get("equipped") == key:
+            profile["equipped"] = "knife" if item_count(profile, "knife") else ""
+    return True
+
+
+def weapon_for(profile: dict) -> dict:
+    key = profile.get("equipped") or "fists"
+    template = item_template(key)
+    if template.get("category") != "weapon" or item_count(profile, key) <= 0:
+        key = "fists"
+        template = ITEMS["fists"]
+    return {"key": key, **template}
+
+
+def contract_progress(profile: dict, contract: dict | None = None) -> int:
+    contract = contract or profile.get("contract")
+    if not contract:
+        return 0
+    kind = contract.get("kind")
+    stats = profile.get("stats", {})
+    base = contract.get("base", {})
+    if kind == "patrol":
+        return int(max(0.0, stats.get("walked", 0.0) - base.get("walked", 0.0)))
+    if kind == "shift":
+        return int(max(0.0, stats.get("seconds", 0.0) - base.get("seconds", 0.0)))
+    if kind == "haul":
+        return int(max(0, stats.get("trips", 0) - base.get("trips", 0)))
+    if kind == "hunt":
+        return int(max(0, stats.get("kills", 0) - base.get("kills", 0)))
+    return int(contract.get("progress", 0))
+
+
+def contract_public(profile: dict, contract: dict) -> dict:
+    progress = contract_progress(profile, contract)
+    return {
+        **contract,
+        "progress": min(progress, int(contract.get("goal", 0))),
+        "done": progress >= int(contract.get("goal", 0)),
+        "expired": time.time() > float(contract.get("deadline", 0)),
+    }
+
+
+def contract_offers(profile: dict) -> list[dict]:
+    unlocked = max(1, int(profile.get("contractsDone", 0)))
+    keys = ["patrol", "shift"]
+    keys.append("haul" if unlocked >= 1 else "patrol")
+    keys.append("hunt")
+    offers = []
+    for key in keys:
+        base = CONTRACTS[key]
+        offers.append({
+            "id": key, "kind": base["kind"], "title": base["title"],
+            "brief": base["brief"], "goal": base["goal"], "unit": base["unit"],
+            "reward": base["reward"], "xp": base["xp"],
+            "progress": 0,
+        })
+    return offers
+
+
+def shop_stock(profile: dict) -> list[dict]:
+    stock = []
+    for key in SHOP_STOCK:
+        item = ITEMS[key]
+        stock.append({
+            "key": key, "name": item["name"], "price": item["price"],
+            "icon": item["icon"], "desc": item["desc"],
+            "category": item["category"], "owned": item_count(profile, key),
+        })
+    return stock
+
+
+def pending_trade_for(player_id: str) -> dict | None:
+    now = time.time()
+    with TRADES_LOCK:
+        for offer_id, offer in list(TRADES.items()):
+            if now - offer.get("at", now) > 120:
+                TRADES.pop(offer_id, None)
+                continue
+            if offer.get("to") == player_id:
+                return {
+                    "id": offer_id, "from": offer["from"],
+                    "fromName": offer["fromName"], "cash": offer["cash"],
+                    "items": [
+                        {"key": entry["key"], "qty": entry["qty"],
+                         "name": item_template(entry["key"])["name"],
+                         "icon": item_template(entry["key"])["icon"]}
+                        for entry in offer["items"]
+                    ],
+                    "want": [
+                        {"key": entry["key"], "qty": entry["qty"],
+                         "name": item_template(entry["key"])["name"],
+                         "icon": item_template(entry["key"])["icon"]}
+                        for entry in offer.get("want", [])
+                    ],
+                    "wantCash": offer.get("wantCash", 0),
+                    "secondsLeft": max(0, int(120 - (now - offer.get("at", now)))),
+                }
+    return None
+
+
+def profile_public(profile: dict) -> dict:
+    xp = int(profile.get("xp", 0))
+    level = 1 + xp // 220
+    weapon = weapon_for(profile)
+    boss = profile.get("boss") or {}
+    contract = profile.get("contract")
+    return {
+        "clientId": profile.get("clientId"),
+        "cash": round(float(profile.get("cash", 0.0)), 2),
+        "currency": profile.get("currency", "₺"),
+        "xp": xp, "level": level, "xpNext": 220 - (xp % 220),
+        "kills": int(profile.get("kills", 0)),
+        "contractsDone": int(profile.get("contractsDone", 0)),
+        "band": int(profile.get("band", 1)),
+        "bands": [{"name": band["name"], "place": band["place"], "hp": band["hp"],
+                   "color": band["color"]} for band in BOSS_BANDS],
+        "equipped": weapon["key"],
+        "weapon": {key: weapon.get(key) for key in
+                   ("key", "name", "damage", "range", "rate", "icon", "ammo")},
+        "ammo": item_count(profile, "ammo"),
+        "items": [
+            {"key": entry.get("key"), "qty": int(entry.get("qty", 0)),
+             **{k: item_template(entry.get("key")).get(k)
+                for k in ("name", "category", "icon", "price", "damage", "heal",
+                          "range", "rate", "desc", "ammo")}}
+            for entry in profile.get("items", [])
+        ],
+        "contract": contract_public(profile, contract) if contract else None,
+        "boss": {"band": int(boss.get("band", 0)), "hp": int(boss.get("hp", 0)),
+                 "maxHp": int(boss.get("maxHp", 0)), "active": bool(boss.get("active")),
+                 "starts": int(boss.get("starts", 0))},
+        "stats": profile.get("stats", {}),
+        "updated": profile.get("updated"),
+    }
 
 
 def _visible_to(message: dict, viewer: str | None) -> bool:
@@ -1615,6 +2227,12 @@ def reap_loop() -> None:
                 room.reap()
                 if not room.players and now - room.last_active > ROOM_IDLE_TIMEOUT:
                     ROOMS.pop(code, None)
+        # Gear, contract progress and boss bands are flushed in the same loop
+        # that reaps rooms, so a crash costs at most a few seconds of walking.
+        try:
+            flush_profiles()
+        except Exception as exc:  # pragma: no cover - persistence is defensive
+            log_event("warn", "Profile flush failed", str(exc))
 
 
 def find_player_global(player_id: str = "", name: str = "") -> tuple[Room, Player] | tuple[None, None]:
@@ -1851,6 +2469,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._html(ADMIN_PAGE)
             if path.startswith("/api/"):
                 return self._api_get(path)
+            if path in ("/download/server.py", "/server.py"):
+                return self._server_file()
             return self._static(path)
         except ApiError as exc:
             return self._error(exc.status, exc.message)
@@ -1871,6 +2491,30 @@ class Handler(BaseHTTPRequestHandler):
             pass
         except Exception as exc:  # pragma: no cover - defensive
             return self._error(500, f"Server error: {exc}")
+
+    # -- downloads --------------------------------------------------------- #
+    def _server_file(self):
+        """Hand over the very file this host is running.
+
+        The host card offers it because a player who reached the game over the
+        network has no server.py of their own to start.
+        """
+        target = os.path.join(BASE_DIR, "server.py")
+        if not os.path.isfile(target):
+            raise ApiError(404, "server.py is not available on this host")
+        with open(target, "rb") as handle:
+            body = handle.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/x-python; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", 'attachment; filename="server.py"')
+        self.send_header("Cache-Control", "no-cache")
+        self._cors()
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass
 
     # -- static ------------------------------------------------------------ #
     def _static(self, path: str):
@@ -1958,6 +2602,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_action()
         if parts == ["api", "admin", "login"]:
             return self._login_admin()
+        if parts == ["api", "register"]:
+            return self._register_account()
+        if parts == ["api", "login"]:
+            return self._login_account()
+        if parts == ["api", "session"]:
+            return self._resume_account()
+        if parts == ["api", "logout"]:
+            return self._logout_account()
+        if parts == ["api", "character"]:
+            return self._driver_character()
         if parts == ["api", "fleet"]:
             body = self._body()
             client_id = SAFE_ID.sub("", str(body.get("clientId") or ""))[:64]
@@ -1969,6 +2623,69 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "rooms"]:
             return self._room_action(parts[2].upper(), parts[3])
         raise ApiError(404, "Unknown endpoint")
+
+    def _require_account(self, body: dict) -> dict:
+        """Rooms are entered with an account session, never a bare client id."""
+        account = session_account(body.get("session"))
+        if account is None:
+            raise ApiError(401, "Sign in to enter the realm — your driver lives on the host")
+        return account
+
+    def _register_account(self):
+        body = self._body()
+        ip = self.client_ip
+        _account_guard(ip)
+        try:
+            account = create_account(body.get("username"), body.get("password"), ip)
+        except ApiError:
+            _account_failed(ip)
+            raise
+        _account_clear_fails(ip)
+        token = issue_session(account["clientId"])
+        return self._json({"ok": True, **account, "token": token})
+
+    def _login_account(self):
+        body = self._body()
+        ip = self.client_ip
+        _account_guard(ip)
+        try:
+            account = authenticate_account(body.get("username"), body.get("password"), ip)
+        except ApiError:
+            _account_failed(ip)
+            raise
+        _account_clear_fails(ip)
+        token = issue_session(account["clientId"])
+        log_event("join", f"Signed in: {account['username']}", ip)
+        return self._json({"ok": True, **account, "token": token})
+
+    def _resume_account(self):
+        body = self._body()
+        account = session_account(body.get("token"))
+        if account is None:
+            raise ApiError(401, "That session has expired — sign in again")
+        return self._json({"ok": True, **account})
+
+    def _logout_account(self):
+        body = self._body()
+        revoke_session(body.get("token"))
+        return self._json({"ok": True})
+
+    def _driver_character(self):
+        """GET semantics through POST: the session token identifies the driver."""
+        body = self._body()
+        account = session_account(body.get("session"))
+        if account is None:
+            raise ApiError(401, "Sign in to keep a driver")
+        action = str(body.get("action") or "get")
+        if action == "get":
+            return self._json({"ok": True, "character": load_character(account["clientId"])})
+        if action != "save":
+            raise ApiError(404, "Unknown character action")
+        character = sanitize_character(body.get("character"))
+        if character is None:
+            raise ApiError(400, "Expected a character sheet")
+        save_character(account["clientId"], character)
+        return self._json({"ok": True, "character": character})
 
     # -- admin actions ------------------------------------------------------ #
     def _admin_action(self):
@@ -2041,15 +2758,17 @@ class Handler(BaseHTTPRequestHandler):
         theme = body.get("theme")
         name = sanitize_name(body.get("name"), "The Wanderer's Rest")
         try:
-            max_players = int(body.get("maxPlayers", 8))
+            max_players = int(body.get("maxPlayers", DEFAULT_ROOM_SLOTS))
         except (TypeError, ValueError):
-            max_players = 8
+            max_players = DEFAULT_ROOM_SLOTS
         max_players = max(2, min(MAX_PLAYERS_LIMIT, max_players))
         password = str(body.get("password") or "")[:40]
         theme = theme if theme in THEMES else "ember"
 
         payload = body.get("player") if isinstance(body.get("player"), dict) else {}
-        client_id = SAFE_ID.sub("", str(payload.get("clientId") or ""))[:64]
+        account = self._require_account(body)
+        payload = {**payload, "clientId": account["clientId"]}
+        client_id = account["clientId"]
         wanted_name = sanitize_name(payload.get("name"))
         banned = ban_matches(client_id, wanted_name, self.client_ip)
         if banned:
@@ -2091,14 +2810,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._sync(room)
         if action == "chat":
             return self._chat(room)
+        if action == "profile":
+            return self._profile(room)
+        if action == "boss":
+            return self._boss(room)
+        if action == "trade":
+            return self._trade(room)
         if action == "leave":
             return self._leave(room)
         raise ApiError(404, "Unknown room action")
 
     def _join(self, room: Room):
         body = self._body()
+        account = self._require_account(body)
+        client_id = account["clientId"]
         payload = body.get("player") if isinstance(body.get("player"), dict) else {}
-        client_id = SAFE_ID.sub("", str(payload.get("clientId") or ""))[:64]
+        payload = {**payload, "clientId": client_id}
         wanted_name = sanitize_name(payload.get("name"))
         banned = ban_matches(client_id, wanted_name, self.client_ip)
         if banned:
@@ -2140,12 +2867,40 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             since = 0
 
+        profile = player.profile
+        now = time.time()
+        delta_seconds = min(3.0, max(0.0, now - player.last_seen))
+        old_x, old_z = float(player.pos[0]), float(player.pos[2])
         pos = body.get("pos")
         if isinstance(pos, list) and len(pos) == 3:
             try:
-                player.pos = [max(-40.0, min(40.0, float(v))) for v in pos]
+                # The city is 176 m wide and the interiors sit hundreds of metres
+                # off-grid; the themed rooms reach z=-488, and the gate sits at
+                # (-304, -344), so the clamp has to clear all of them.
+                player.pos = [max(-900.0, min(900.0, float(v))) for v in pos]
             except (TypeError, ValueError):
                 pass
+        zone = body.get("zone")
+        if isinstance(zone, str) and zone in ("city", "interior", "raid"):
+            player.zone = zone
+        weapon_key = body.get("weapon")
+        if isinstance(weapon_key, str):
+            if not weapon_key:
+                player.weapon = ""
+            elif item_template(weapon_key).get("category") == "weapon" and item_count(profile, weapon_key):
+                player.weapon = weapon_key
+        # Contract progress is measured from the server's own movement log, so
+        # a modified client cannot simply report the payout threshold.
+        if profile is not None:
+            if player.zone in ("city", "interior"):
+                profile["stats"]["seconds"] = round(
+                    float(profile["stats"].get("seconds", 0.0)) + delta_seconds, 2)
+            if player.zone == "city":
+                distance = math.hypot(player.pos[0] - old_x, player.pos[2] - old_z)
+                if 0.01 < distance < 12.0:
+                    profile["stats"]["walked"] = round(
+                        float(profile["stats"].get("walked", 0.0)) + distance, 2)
+                    mark_profile_dirty(player.client_id)
         rot = body.get("rot")
         if isinstance(rot, (int, float)):
             player.rot = float(rot) % 6.2832
@@ -2170,8 +2925,315 @@ class Handler(BaseHTTPRequestHandler):
                 "messages": messages,
                 "room": {"code": room.code, "name": room.name, "theme": room.theme},
                 "fear": player.fear_state(),
+                "trade": pending_trade_for(player.id),
             }
         return self._json(payload)
+
+    # -- profile, workshop, contracts and the boss run ---------------------- #
+    def _profile(self, room: Room):
+        body = self._body()
+        player = self._require_player(room, body)
+        profile = player.profile
+        if profile is None:
+            raise ApiError(400, "This session has no profile")
+        action = str(body.get("action") or "get")
+
+        def done(**extra):
+            return self._json({"ok": True, "profile": profile_public(profile), **extra})
+
+        if action == "get":
+            return done(offers=contract_offers(profile), shop=shop_stock(profile))
+
+        if action == "buy":
+            key = str(body.get("key") or "")
+            if key not in SHOP_STOCK:
+                raise ApiError(404, "The counter does not stock that")
+            try:
+                qty = max(1, min(10, int(body.get("qty") or 1)))
+            except (TypeError, ValueError):
+                qty = 1
+            total = ITEMS[key]["price"] * qty
+            if total > float(profile.get("cash", 0)):
+                raise ApiError(402, "Not enough cash for that")
+            profile["cash"] = round(float(profile["cash"]) - total, 2)
+            grant_item(profile, key, qty)
+            save_profile(profile)
+            return done(shop=shop_stock(profile), bought={"key": key, "qty": qty, "price": total})
+
+        if action == "sell":
+            key = str(body.get("key") or "")
+            if key not in ITEMS or key in ("id_card", "trophy", "fists"):
+                raise ApiError(400, "That is not something the counter buys")
+            if profile.get("equipped") == key and item_count(profile, key) <= 1:
+                raise ApiError(409, "Holster it before you sell it")
+            try:
+                qty = max(1, min(20, int(body.get("qty") or 1)))
+            except (TypeError, ValueError):
+                qty = 1
+            if not take_item(profile, key, qty):
+                raise ApiError(400, "You do not carry that many")
+            worth = max(1, int(round(ITEMS[key]["price"] * 0.55))) * qty
+            profile["cash"] = round(float(profile.get("cash", 0)) + worth, 2)
+            save_profile(profile)
+            return done(shop=shop_stock(profile), sold={"key": key, "qty": qty, "price": worth})
+
+        if action == "equip":
+            key = str(body.get("key") or "")
+            template = ITEMS.get(key)
+            if not template or template.get("category") != "weapon" or item_count(profile, key) <= 0:
+                raise ApiError(400, "That is not in your kit")
+            profile["equipped"] = key
+            save_profile(profile)
+            return done()
+
+        if action == "use":
+            key = str(body.get("key") or "")
+            template = ITEMS.get(key)
+            if not template or not template.get("heal"):
+                raise ApiError(400, "That cannot be used")
+            if not take_item(profile, key, 1):
+                raise ApiError(400, "You have none left")
+            save_profile(profile)
+            return done(heal=int(template["heal"]), used=key)
+
+        if action == "contract_accept":
+            offer_id = str(body.get("id") or "")
+            base = CONTRACTS.get(offer_id)
+            if not base:
+                raise ApiError(404, "No such contract")
+            if profile.get("contract"):
+                raise ApiError(409, "Finish or abandon the contract you already carry")
+            profile["contract"] = {
+                "id": offer_id, "kind": base["kind"], "title": base["title"],
+                "brief": base["brief"], "goal": base["goal"], "unit": base["unit"],
+                "reward": base["reward"], "xp": base["xp"],
+                "base": {k: profile["stats"].get(k, 0) for k in
+                         ("walked", "seconds", "trips", "kills")},
+                "accepted": time.time(), "deadline": time.time() + 1800,
+            }
+            save_profile(profile)
+            return done(offers=contract_offers(profile))
+
+        if action in ("contract_claim", "contract_abandon"):
+            contract = profile.get("contract")
+            if not contract:
+                raise ApiError(409, "You carry no contract")
+            if action == "contract_abandon":
+                profile["contract"] = None
+                save_profile(profile)
+                return done(offers=contract_offers(profile), abandoned=True)
+            if time.time() > float(contract.get("deadline", 0)):
+                profile["contract"] = None
+                save_profile(profile)
+                raise ApiError(409, "That shift expired before you checked in")
+            progress = contract_progress(profile, contract)
+            if progress < int(contract["goal"]):
+                raise ApiError(409, f"Not finished — {progress}/{contract['goal']} {contract['unit']}")
+            reward = int(contract["reward"])
+            profile["cash"] = round(float(profile.get("cash", 0)) + reward, 2)
+            profile["xp"] = int(profile.get("xp", 0)) + int(contract.get("xp", 0))
+            profile["contractsDone"] = int(profile.get("contractsDone", 0)) + 1
+            profile["contract"] = None
+            save_profile(profile)
+            return done(offers=contract_offers(profile), paid=reward)
+
+        raise ApiError(404, "Unknown profile action")
+
+    def _boss(self, room: Room):
+        body = self._body()
+        player = self._require_player(room, body)
+        profile = player.profile
+        if profile is None:
+            raise ApiError(400, "This session has no profile")
+        action = str(body.get("action") or "start")
+        state = profile.get("boss") or {}
+
+        if action == "start":
+            try:
+                band = max(1, min(len(BOSS_BANDS), int(body.get("band") or profile.get("band", 1))))
+            except (TypeError, ValueError):
+                band = int(profile.get("band", 1))
+            if band > int(profile.get("band", 1)):
+                raise ApiError(403, "That band has not opened yet — break the one before it")
+            spec = BOSS_BANDS[band - 1]
+            profile["boss"] = {
+                "band": band, "hp": spec["hp"], "maxHp": spec["hp"],
+                "active": True, "lastHit": 0.0,
+                "starts": int(state.get("starts", 0)) + 1,
+            }
+            save_profile(profile)
+            return self._json({"ok": True, "boss": {
+                "band": band, "name": spec["name"], "place": spec["place"],
+                "hp": spec["hp"], "maxHp": spec["hp"], "color": spec["color"],
+            }, "profile": profile_public(profile)})
+
+        if action == "leave":
+            profile["boss"] = {**state, "active": False}
+            save_profile(profile)
+            return self._json({"ok": True, "profile": profile_public(profile)})
+
+        if action != "hit":
+            raise ApiError(404, "Unknown boss action")
+        if not state.get("active"):
+            raise ApiError(409, "No boss is awake — step into the gate first")
+        band = int(state.get("band", 1))
+        spec = BOSS_BANDS[max(0, min(len(BOSS_BANDS) - 1, band - 1))]
+        now = time.time()
+        weapon = weapon_for(profile)
+        rate = float(weapon.get("rate", 0.4))
+        if now - float(state.get("lastHit", 0)) < rate:
+            raise ApiError(429, "Steady — the weapon is still cycling")
+        if weapon.get("ammo"):
+            if item_count(profile, "ammo") <= 0:
+                raise ApiError(409, "No rounds left — buy ammo or draw the dagger")
+            take_item(profile, "ammo", 1)
+        state["lastHit"] = now
+        crit = random.random() < 0.12
+        damage = int(round(float(weapon.get("damage", 5)) * random.uniform(0.86, 1.14) * (1.8 if crit else 1)))
+        state["hp"] = max(0, int(state.get("hp", 0)) - damage)
+        defeated = state["hp"] <= 0
+        loot = []
+        if defeated:
+            loot = [{"key": key, "qty": qty, "name": item_template(key)["name"],
+                     "icon": item_template(key)["icon"]} for key, qty in spec["loot"]]
+            for entry in loot:
+                grant_item(profile, entry["key"], entry["qty"])
+            profile["cash"] = round(float(profile.get("cash", 0)) + spec["cash"], 2)
+            profile["xp"] = int(profile.get("xp", 0)) + int(spec["xp"])
+            profile["kills"] = int(profile.get("kills", 0)) + 1
+            profile["stats"]["kills"] = int(profile["stats"].get("kills", 0)) + 1
+            profile["band"] = min(len(BOSS_BANDS), max(int(profile.get("band", 1)), band + 1))
+            state["active"] = False
+            room.broadcast({
+                "kind": "system", "from": None,
+                "text": f"{player.name} put down {spec['name']} in {spec['place']}.",
+            })
+        save_profile(profile)
+        return self._json({
+            "ok": True, "damage": damage, "crit": crit, "defeated": defeated,
+            "loot": loot, "cash": spec["cash"] if defeated else 0,
+            "boss": {"band": band, "name": spec["name"], "place": spec["place"],
+                     "hp": int(state.get("hp", 0)), "maxHp": int(state.get("maxHp", spec["hp"])),
+                     "color": spec["color"], "active": bool(state.get("active"))},
+            "profile": profile_public(profile),
+        })
+
+    def _trade(self, room: Room):
+        body = self._body()
+        player = self._require_player(room, body)
+        profile = player.profile
+        action = str(body.get("action") or "")
+
+        def offer_items(raw) -> list[dict]:
+            out = []
+            for entry in (raw if isinstance(raw, list) else [])[:8]:
+                if not isinstance(entry, dict):
+                    continue
+                key = str(entry.get("key") or "")
+                if key not in ITEMS or key == "fists":
+                    continue
+                try:
+                    qty = max(1, min(99, int(entry.get("qty") or 1)))
+                except (TypeError, ValueError):
+                    qty = 1
+                out.append({"key": key, "qty": qty})
+            return out
+
+        if action == "offer":
+            target_id = str(body.get("to") or "")
+            with room.lock:
+                target = room.players.get(target_id)
+            if target is None or target.id == player.id:
+                raise ApiError(404, "That person is not here")
+            if target.zone != player.zone:
+                raise ApiError(409, "You have to stand in the same place")
+            if math.hypot(target.pos[0] - player.pos[0], target.pos[2] - player.pos[2]) > 10:
+                raise ApiError(409, "Step closer — arm's length, not across the district")
+            give = offer_items(body.get("items"))
+            want = offer_items(body.get("want"))
+            try:
+                cash = max(0, min(100000, int(body.get("cash") or 0)))
+                want_cash = max(0, min(100000, int(body.get("wantCash") or 0)))
+            except (TypeError, ValueError):
+                cash = want_cash = 0
+            if not (give or want or cash or want_cash):
+                raise ApiError(400, "An empty offer is not a trade")
+            for entry in give:
+                if item_count(profile, entry["key"]) < entry["qty"]:
+                    raise ApiError(400, "You do not carry that many")
+            if cash > float(profile.get("cash", 0)):
+                raise ApiError(402, "You cannot put up more cash than you carry")
+            with TRADES_LOCK:
+                for offer_id, old in list(TRADES.items()):
+                    if old.get("from") == player.id:
+                        TRADES.pop(offer_id, None)
+                offer_id = uuid.uuid4().hex[:10]
+                TRADES[offer_id] = {
+                    "id": offer_id, "from": player.id, "fromName": player.name,
+                    "to": target.id, "toName": target.name,
+                    "items": give, "want": want, "cash": cash, "wantCash": want_cash,
+                    "at": time.time(),
+                }
+            return self._json({"ok": True, "offer": {
+                "id": offer_id, "to": target.name,
+                "items": [{"key": e["key"], "qty": e["qty"], "name": ITEMS[e["key"]]["name"]} for e in give],
+                "want": [{"key": e["key"], "qty": e["qty"], "name": ITEMS[e["key"]]["name"]} for e in want],
+                "cash": cash, "wantCash": want_cash,
+            }})
+
+        if action in ("accept", "decline", "cancel"):
+            offer_id = str(body.get("id") or "")
+            with TRADES_LOCK:
+                offer = TRADES.get(offer_id)
+                if offer is None:
+                    raise ApiError(404, "That offer is gone")
+                if action == "cancel" and offer.get("from") != player.id:
+                    raise ApiError(403, "That is not your offer")
+                if action in ("accept", "decline") and offer.get("to") != player.id:
+                    raise ApiError(403, "That offer was not made to you")
+                if action == "cancel" or time.time() - offer.get("at", 0) > 120:
+                    TRADES.pop(offer_id, None)
+                    return self._json({"ok": True, "cancelled": True})
+                if action == "decline":
+                    TRADES.pop(offer_id, None)
+                    return self._json({"ok": True, "declined": True})
+            with room.lock:
+                sender = room.players.get(offer["from"])
+            if sender is None:
+                with TRADES_LOCK:
+                    TRADES.pop(offer_id, None)
+                raise ApiError(409, "The other trader left the room")
+            sender_profile = sender.profile
+            with PROFILE_LOCK:
+                for entry in offer["items"]:
+                    if item_count(sender_profile, entry["key"]) < entry["qty"]:
+                        raise ApiError(409, "The other trader no longer has that item")
+                for entry in offer["want"]:
+                    if item_count(profile, entry["key"]) < entry["qty"]:
+                        raise ApiError(409, f"You do not carry {entry['qty']}× {ITEMS[entry['key']]['name']}")
+                if offer["cash"] > float(sender_profile.get("cash", 0)):
+                    raise ApiError(409, "The other trader is short on cash")
+                if offer["wantCash"] > float(profile.get("cash", 0)):
+                    raise ApiError(402, "You cannot match that cash")
+                for entry in offer["items"]:
+                    take_item(sender_profile, entry["key"], entry["qty"])
+                    grant_item(profile, entry["key"], entry["qty"])
+                for entry in offer["want"]:
+                    take_item(profile, entry["key"], entry["qty"])
+                    grant_item(sender_profile, entry["key"], entry["qty"])
+                sender_profile["cash"] = round(float(sender_profile.get("cash", 0)) - offer["cash"] + offer["wantCash"], 2)
+                profile["cash"] = round(float(profile.get("cash", 0)) + offer["cash"] - offer["wantCash"], 2)
+                save_profile(sender_profile)
+                save_profile(profile)
+                with TRADES_LOCK:
+                    TRADES.pop(offer_id, None)
+            room.broadcast({
+                "kind": "system", "from": None,
+                "text": f"{sender.name} and {player.name} shook on a trade.",
+            })
+            return self._json({"ok": True, "profile": profile_public(profile), "traded": True})
+
+        raise ApiError(404, "Unknown trade action")
 
     # -- chat --------------------------------------------------------------- #
     def _chat(self, room: Room):
@@ -2322,7 +3384,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if lowered.startswith("/draw"):
             weapon = text[5:].strip().lower() or "blade"
-            if weapon not in ("blade", "sword", "bow", "staff", "axe", "knife", "dagger", "spear"):
+            # Guns and blades share the same fear-RP broadcast; the item key is
+            # what other clients render in the avatar's hand.
+            if weapon not in ("blade", "sword", "bow", "staff", "axe", "knife", "dagger",
+                              "spear", "pistol", "shotgun", "carbine"):
                 weapon = "blade"
             player.weapon = "blade" if weapon in ("sword", "knife", "dagger") else weapon
             threatened = room.others_near(player, FEAR_RADIUS)
@@ -2440,6 +3505,12 @@ class Handler(BaseHTTPRequestHandler):
             if player is not None:
                 player.weapon = ""
                 player.fear_due = 0.0
+                if player.profile is not None:
+                    save_profile(player.profile)
+                with TRADES_LOCK:
+                    for offer_id, offer in list(TRADES.items()):
+                        if player.id in (offer.get("from"), offer.get("to")):
+                            TRADES.pop(offer_id, None)
                 room.remove_player(player.id)
                 log_event("leave", f"{player.name} left {room.code}", player.ip)
                 mods_emit("leave", room=room, player=player)
@@ -3271,8 +4342,8 @@ def main(argv=None) -> None:
     parser.add_argument("--room", default="", help="create a pre-made room with this name")
     parser.add_argument("--theme", default="ember", choices=sorted(THEMES),
                         help="world theme for the pre-made room")
-    parser.add_argument("--max-players", type=int, default=8,
-                        help="player cap for the pre-made room (default: 8)")
+    parser.add_argument("--max-players", type=int, default=DEFAULT_ROOM_SLOTS,
+                        help=f"player cap for the pre-made room (default: {DEFAULT_ROOM_SLOTS})")
     parser.add_argument("--password", default="", help="password for the pre-made room")
     parser.add_argument("--admin-key", default=os.environ.get("AETHERHOLD_ADMIN_KEY", ""),
                         help="key for /admin and the control API (random if omitted)")
@@ -3283,8 +4354,8 @@ def main(argv=None) -> None:
     parser.add_argument("--region", default="turkey", choices=sorted(REGIONS),
                         help="region and theme catalog (default: turkey)")
     parser.add_argument("--name", default="", help="server name (region default if omitted)")
-    parser.add_argument("--slots", type=int, default=12,
-                        help="player capacity for the whole server (default: 12)")
+    parser.add_argument("--slots", type=int, default=32,
+                        help="player capacity for the whole server (default: 32)")
     parser.add_argument("--modules", default="vehicles,logistics,world",
                         help="active modules, comma separated")
     parser.add_argument("--db", default=None,

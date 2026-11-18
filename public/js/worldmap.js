@@ -42,11 +42,24 @@ export class WorldMap {
     this.language = activeLanguage;
     this._hits = [];
     this._bounds = null;
+    // Wheel zoom + drag pan. The projection applies the view after fitting the
+    // discovered road network to the canvas.
+    this.view = { zoom: 1, panX: 0, panY: 0 };
+    this._drag = null;
     this._pointerHandler = (event) => this._handleMove(event);
     this._clickHandler = (event) => this._handleClick(event);
+    this._downHandler = (event) => this._handleDown(event);
+    this._upHandler = (event) => this._handleUp(event);
+    this._wheelHandler = (event) => this._handleWheel(event);
+    this._dblHandler = () => this.resetView();
     canvas?.addEventListener("pointermove", this._pointerHandler);
     canvas?.addEventListener("pointerleave", () => { this.hover = null; this.render(); });
     canvas?.addEventListener("click", this._clickHandler);
+    canvas?.addEventListener("pointerdown", this._downHandler);
+    canvas?.addEventListener("pointerup", this._upHandler);
+    canvas?.addEventListener("wheel", this._wheelHandler, { passive: false });
+    canvas?.addEventListener("dblclick", this._dblHandler);
+    if (canvas) canvas.style.cursor = "grab";
   }
 
   setWorld(world) {
@@ -128,10 +141,41 @@ export class WorldMap {
     const spanX = Math.max(1, maxX - minX);
     const spanZ = Math.max(1, maxZ - minZ);
     const scale = Math.min(width / spanX, height / spanZ);
+    const baseX = pad + (x - minX) * scale + (width - spanX * scale) / 2;
+    const baseY = pad + 10 + (z - minZ) * scale + (height - spanZ * scale) / 2;
+    const cx = (this._width || 900) / 2;
+    const cy = (this._height || 560) / 2;
+    const zoom = this.view?.zoom || 1;
     return {
-      x: pad + (x - minX) * scale + (width - spanX * scale) / 2,
-      y: pad + 10 + (z - minZ) * scale + (height - spanZ * scale) / 2,
+      x: cx + (baseX - cx) * zoom + (this.view?.panX || 0),
+      y: cy + (baseY - cy) * zoom + (this.view?.panY || 0),
     };
+  }
+
+  resetView() {
+    this.view = { zoom: 1, panX: 0, panY: 0 };
+    this.render();
+  }
+
+  _handleDown(event) {
+    this._drag = {
+      x: event.clientX, y: event.clientY,
+      panX: this.view.panX, panY: this.view.panY, moved: false,
+    };
+    if (this.canvas) this.canvas.style.cursor = "grabbing";
+  }
+
+  _handleUp() {
+    if (this.canvas) this.canvas.style.cursor = "grab";
+    // A click immediately after a drag should not select a node.
+    setTimeout(() => { this._drag = null; }, 0);
+  }
+
+  _handleWheel(event) {
+    event.preventDefault();
+    const factor = event.deltaY > 0 ? 0.88 : 1.14;
+    this.view.zoom = Math.max(0.7, Math.min(3.2, this.view.zoom * factor));
+    this.render();
   }
 
   _computeBounds() {
@@ -415,13 +459,23 @@ export class WorldMap {
   }
 
   _handleMove(event) {
+    if (this._drag) {
+      const dx = event.clientX - this._drag.x;
+      const dy = event.clientY - this._drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) this._drag.moved = true;
+      this.view.panX = this._drag.panX + dx;
+      this.view.panY = this._drag.panY + dy;
+      this.render();
+      return;
+    }
     const hit = this._hitTest(event);
     if (hit === this.hover) return;
     this.hover = hit;
-    this.canvas.style.cursor = hit ? "pointer" : "default";
+    this.canvas.style.cursor = hit ? "pointer" : "grab";
   }
 
   _handleClick(event) {
+    if (this._drag?.moved) return;
     const hit = this._hitTest(event);
     if (!hit) {
       this.select(null);
@@ -432,6 +486,11 @@ export class WorldMap {
 
   dispose() {
     this.canvas?.removeEventListener("pointermove", this._pointerHandler);
+    this.canvas?.removeEventListener("pointerleave", this._pointerHandler);
     this.canvas?.removeEventListener("click", this._clickHandler);
+    this.canvas?.removeEventListener("pointerdown", this._downHandler);
+    this.canvas?.removeEventListener("pointerup", this._upHandler);
+    this.canvas?.removeEventListener("wheel", this._wheelHandler);
+    this.canvas?.removeEventListener("dblclick", this._dblHandler);
   }
 }

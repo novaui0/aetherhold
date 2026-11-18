@@ -36,8 +36,9 @@ def register(api):
         room = ctx.room
         world = getattr(room, "theme", "ember")
         tagline = TAGLINES.get(getattr(room, "region", ""), "WELCOME TO THE ROAD")
-        ctx.title(ctx.player.name.upper(), tagline)
-        ctx.bar(f"{len(room.players)} on the road · {ctx.player.cls}", 0.35)
+        # Arrival is private: the card and its sound belong to the player who
+        # just walked in, never to everyone else in the hall.
+        ctx.welcome(ctx.player.name, tagline)
         ctx.reply(
             f"Welcome aboard, {ctx.player.name}. /tips for a quick hint, /ping to check the wire."
         )

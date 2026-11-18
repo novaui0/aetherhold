@@ -228,6 +228,9 @@ export const DEFAULT_SETTINGS = {
   motion: true,
   // Couch play: bigger HUD, larger text, controller-first prompts.
   tv: false,
+  // Input device: "auto" sniffs for a touch screen, "pc" forces keyboard +
+  // mouse, "mobile" forces the on-screen joystick and touch buttons.
+  controlMode: "auto",
 };
 
 export const DEFAULT_CHARACTER = {
@@ -259,8 +262,67 @@ export const DEFAULT_CHARACTER = {
 const SETTINGS_KEY = "aetherhold.settings.v1";
 const CHARACTER_KEY = "aetherhold.character.v2";
 const CLIENT_KEY = "aetherhold.client.v1";
+const SESSION_KEY = "aetherhold.session.v1";
+
+function readSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.token !== "string" || !parsed.token) return null;
+    return {
+      token: parsed.token,
+      clientId: typeof parsed.clientId === "string" ? parsed.clientId : "",
+      username: typeof parsed.username === "string" ? parsed.username : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** The signed-in account kept on this device, or null for a guest. */
+export function getAccountSession() {
+  return readSession();
+}
+
+/**
+ * Remember a login. The account id becomes the game's client id, so cash and
+ * gear follow the account instead of this browser's random id.
+ */
+export function setAccountSession(account) {
+  if (!account?.token) return null;
+  const session = {
+    token: String(account.token),
+    clientId: String(account.clientId || ""),
+    username: String(account.username || ""),
+  };
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(session)); } catch { /* private mode */ }
+  if (session.clientId) setClientId(session.clientId);
+  return session;
+}
+
+export function clearAccountSession() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
+    // The account id was copied into the client key on sign-in; forgetting the
+    // account should not leave a signed-out browser holding it.
+    if (parsed?.clientId && localStorage.getItem(CLIENT_KEY) === parsed.clientId) {
+      localStorage.removeItem(CLIENT_KEY);
+    }
+    localStorage.removeItem(SESSION_KEY);
+  } catch { /* private mode */ }
+}
+
+export function setClientId(value) {
+  const clean = String(value || "").replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, 64);
+  if (!clean) return "";
+  try { localStorage.setItem(CLIENT_KEY, clean); } catch { /* private mode */ }
+  return clean;
+}
 
 export function getClientId() {
+  const account = readSession();
+  if (account?.clientId) return account.clientId;
   try {
     let value = localStorage.getItem(CLIENT_KEY);
     if (!value) {
@@ -296,6 +358,17 @@ if (typeof settings.music !== "number" || Number.isNaN(settings.music)) {
 }
 export const character = read(CHARACTER_KEY, DEFAULT_CHARACTER);
 if (!CLASSES[character.cls]) character.cls = "Adventurer";
+
+export function isMobileControlMode() {
+  const mode = settings.controlMode || "auto";
+  if (mode === "mobile") return true;
+  if (mode === "pc") return false;
+  try {
+    return ("ontouchstart" in window) || (navigator.maxTouchPoints || 0) > 0;
+  } catch {
+    return false;
+  }
+}
 
 export function saveSettings(patch = {}) {
   Object.assign(settings, patch);

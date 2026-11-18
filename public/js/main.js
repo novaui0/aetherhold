@@ -6,10 +6,15 @@ import { createBackdrop } from "./backdrop.js";
 import { MenuUI } from "./menu.js";
 import { World } from "./world.js";
 import { WorldMap } from "./worldmap.js";
+import { WelcomeUI } from "./welcome-ui.js";
+import { GameUI } from "./game-ui.js";
+import { Profile, formatCash } from "./profile.js";
+import { account, onAccount, resume } from "./auth.js";
+import { teleportCommand } from "./teleport.js";
 import { language, onLanguage, setLanguage, t, translateDom } from "./i18n.js";
 import {
-  character, characterPayload, CLASSES, enterFullscreen, getClientId, saveSettings, settings,
-  sheetRows, STAT_KEYS, STAT_LABELS, STAT_MAX, toggleFullscreen,
+  character, characterPayload, CLASSES, enterFullscreen, getClientId, isMobileControlMode,
+  saveSettings, settings, sheetRows, STAT_KEYS, STAT_LABELS, STAT_MAX, toggleFullscreen,
 } from "./store.js";
 
 const $ = (id) => document.getElementById(id);
@@ -19,6 +24,8 @@ window.audioEngine = null; // replaced in boot() with the real engine
 
 audio = new AudioEngine(settings);
 window.audioEngine = audio;
+const welcomeUI = new WelcomeUI();
+let welcomeShown = false;
 const backdropCanvas = $("backdrop");
 const backdrop = createBackdrop(backdropCanvas);
 
@@ -27,7 +34,9 @@ let world = null;
 let client = null;
 let session = null;
 let syncTimer = null;
+let syncGeneration = 0;
 let syncing = false;
+let touchControls = null;
 let lastMessageSeq = 0;
 let menuFps = 60;
 let menuFrames = 0;
@@ -44,7 +53,16 @@ let mapSelected = null;
 let fleetBusy = false;
 let fleetSyncTimer = null;
 let vehicleState = null;
-const clientId = getClientId();
+const profile = new Profile();
+let gameUI = null;
+let profileUnsub = null;
+let pendingTrade = null;
+// The account id is the game's client id; keep it fresh across sign-in/out.
+let clientId = getClientId();
+onAccount(() => {
+  clientId = getClientId();
+  updateScoreboard();
+});
 
 const qualityScale = () => (settings.quality === "low" ? 0.75 : settings.quality === "high" ? 1.15 : 1);
 
@@ -118,6 +136,148 @@ function gameToast(message, kind = "") {
     setTimeout(() => node.remove(), 320);
   }, 4600);
   while (stack.children.length > 4) stack.firstElementChild.remove();
+}
+
+// ── profile, loadout and the gate ──────────────────────────────────────
+// The server owns cash, gear and band progress. This block only mirrors it and
+// turns clicks into authenticated room calls.
+function nearbyPlayers() {
+  if (!world || !session) return [];
+  const out = [];
+  for (const record of world.players?.values?.() || []) {
+    if (!record || record.id === session.playerId) continue;
+    const point = record.group?.position;
+    if (!point) continue;
+    const distance = Math.hypot(point.x - world.position.x, point.z - world.position.z);
+    if (distance > 10) continue;
+    out.push({
+      id: record.id,
+      name: record.data?.name || record.data?.sheet?.name || "Driver",
+      cls: record.data?.cls || "",
+      distance,
+    });
+  }
+  return out.sort((a, b) => a.distance - b.distance);
+}
+
+function gamePanelOpen() {
+  return Boolean(gameUI?.isOpen())
+    || ["pause", "sheet", "help", "map-overlay"].some((id) => overlayOpen(id));
+}
+
+function restoreGameInput() {
+  if (!gamePanelOpen() && !chestOpen) world?.setInputEnabled(true);
+}
+
+function setupGameUI() {
+  gameUI?.destroy();
+  gameUI = new GameUI({
+    profile,
+    api: async (action, payload) => {
+      if (!client) throw new Error("The hall is not connected");
+      return client.profile(action, payload);
+    },
+    toast: (message, kind) => gameToast(message, kind || ""),
+    getNearby: nearbyPlayers,
+    onOpen: () => {
+      ["pause", "sheet", "help"].forEach((id) => $(id)?.classList.add("hidden"));
+      $("map-overlay")?.classList.add("hidden");
+      if (chestOpen) closeChest();
+      world?.releaseLook();
+      world?.setInputEnabled(false);
+    },
+    onClose: () => {
+      restoreGameInput();
+    },
+    onHeal: (amount) => {
+      if (!world || !amount) return;
+      world.stats.health = Math.min(100, world.stats.health + amount);
+      gameToast(`+${amount} health`, "good");
+      audio.chime();
+    },
+    onVehicle: () => openChest(),
+  });
+  gameUI.setPendingTrade(pendingTrade);
+}
+
+function toggleGamePanel(tab = "kit") {
+  if (!session || !gameUI) return;
+  if (gameUI.isOpen()) {
+    if (gameUI.tab === tab) gameUI.close();
+    else gameUI.open(tab);
+  } else {
+    if (overlayOpen("map-overlay")) closeMap();
+    gameUI.open(tab);
+  }
+}
+
+async function resolveAttack() {
+  if (!client || world?.zone !== "raid") return;
+  audio.hit();
+  try {
+    const data = await client.boss("hit");
+    if (!world || world.zone !== "raid") return;
+    profile.apply(data.profile);
+    world.setProfile(profile.data);
+    world.raid?.setHp(data.boss.hp, data.boss.maxHp);
+    world.raid?.impact(Boolean(data.crit));
+    gameUI?.updateBoss({ hp: data.boss.hp, maxHp: data.boss.maxHp, band: data.boss.band });
+    if (data.crit) gameUI?.flashBoss(true);
+    if (data.defeated) {
+      world.raid?.defeat();
+      audio.loot();
+      const loot = (data.loot || []).map((entry) => `${entry.name} ×${entry.qty}`).join(" · ");
+      gameUI?.setBossTip(`${formatCash(data.cash, profile.currency)} · ${loot || "no loot"} · <kbd>B</kbd> leave`);
+      showCenter(`${data.boss.name} falls`, `${data.boss.place} — band ${data.boss.band} cleared`, 3400);
+      showTopBar(`${data.boss.place} cleared`, 1, 2600);
+      gameToast(`Band ${data.boss.band} cleared — ${formatCash(data.cash, profile.currency)}${loot ? ` · ${loot}` : ""}`, "good");
+      updateScoreboard();
+    }
+  } catch (error) {
+    // The server paces shots by the weapon's cycle time; a racing swing is
+    // expected and should not spam the toast stack.
+    if (error.status !== 429) gameToast(error.message || "The strike did not land", "bad");
+  }
+}
+
+async function enterBossGate() {
+  if (!client || !world) return;
+  if (world.zone === "raid") { leaveBossGate(); return; }
+  if (!profile.ready) { gameToast("Your sheet has not arrived yet", "bad"); return; }
+  if (overlayOpen("map-overlay")) closeMap();
+  if (gameUI?.isOpen()) gameUI.close();
+  if (chestOpen) closeChest();
+  const band = profile.band;
+  try {
+    const data = await client.boss("start", { band });
+    profile.apply(data.profile);
+    world.setProfile(profile.data);
+    const info = world.enterRaid(band);
+    if (!info) throw new Error("The gate did not open");
+    world.raid?.setHp(data.boss.hp, data.boss.maxHp);
+    gameUI?.showBoss(data.boss);
+    gameUI?.setBossTip("Left click to strike · <kbd>R</kbd> draw · <kbd>B</kbd> leave");
+    showCenter(data.boss.name, data.boss.place, 2800);
+    showTopBar(`Band ${band} of 5 — ${data.boss.name}`, 0, 2400);
+    audio.portal();
+    const root = $("game");
+    root?.classList.add("raid-warp");
+    setTimeout(() => root?.classList.remove("raid-warp"), 900);
+    world.requestLook?.();
+    updateScoreboard();
+  } catch (error) {
+    gameToast(error.message || "The gate stays shut", "bad");
+  }
+}
+
+function leaveBossGate() {
+  if (!world || world.zone !== "raid") return;
+  world.leaveRaid();
+  gameUI?.hideBoss();
+  client?.boss("leave").then((data) => {
+    if (data?.profile) profile.apply(data.profile);
+  }).catch(() => { /* the next start resets it */ });
+  audio.door();
 }
 
 function stamp(ts) {
@@ -275,6 +435,18 @@ function appendMessage(message) {
   const kind = message.kind || "chat";
   // Server events (including mod output) can drive the big screen furniture
   // instead of the chat log.
+  if (kind === "welcome") {
+    // Private arrival card: the server addressed this event to us alone.
+    welcomeShown = true;
+    welcomeUI.show({
+      name: message.text || character.name,
+      cls: `${CLASSES[character.cls]?.icon || "✦"} ${character.cls || "Adventurer"}`,
+      tagline: message.detail || t("welcome.tagline"),
+      tip: t("welcome.tip"),
+    });
+    audio.welcome();
+    return;
+  }
   if (kind === "title") {
     showCenter(message.text || "", message.detail || "", 4600);
     audio.chime();
@@ -327,6 +499,10 @@ function runChatCommand(cmd) {
   const clean = String(cmd || "").trim();
   if (!clean) return;
   const base = clean.split(" ")[0].toLowerCase();
+  if (base === "/tp") {
+    runTeleport(clean.slice(3).trim());
+    return;
+  }
   const local = LOCAL_COMMANDS[base];
   if (local) {
     closeAllOverlays();
@@ -341,10 +517,42 @@ function runChatCommand(cmd) {
   }
 }
 
+// Chat-visible feedback for commands the client answers on its own.
+function echoSystem(text) {
+  if (!text) return;
+  appendMessage({ kind: "system", from: null, text, ts: Date.now() });
+}
+
+function runTeleport(args) {
+  if (!world) {
+    gameToast(t("tp.noworld"), "bad");
+    return;
+  }
+  const result = teleportCommand(world, args);
+  echoSystem(result.text);
+  if (result.run === "boss") {
+    audio.portal?.();
+    enterBossGate();
+    return;
+  }
+  if (!result.ok) {
+    gameToast(result.text, "bad");
+    audio.error();
+    return;
+  }
+  gameToast(result.text, "good");
+  audio.chime?.();
+  updateActionBar();
+}
+
 function sendChat(text) {
   if (!client || !text.trim()) return;
   const value = text.trim().slice(0, 400);
   const base = value.split(" ")[0].toLowerCase();
+  if (base === "/tp") {
+    runTeleport(value.slice(3).trim());
+    return;
+  }
   if (LOCAL_COMMANDS[base]) {
     LOCAL_COMMANDS[base]();
     return;
@@ -381,7 +589,13 @@ function bindChat() {
     }
   });
   input?.addEventListener("focus", () => world?.setInputEnabled(false));
-  input?.addEventListener("blur", () => world?.setInputEnabled(true));
+  input?.addEventListener("blur", () => {
+    world?.setInputEnabled(true);
+    // The phone chat tray folds away as soon as the keyboard is dismissed.
+    setTimeout(() => {
+      if (document.activeElement !== input) document.body.classList.remove("touch-chat-open");
+    }, 140);
+  });
 
   const channel = $("channel-toggle");
   channel?.addEventListener("click", () => {
@@ -773,10 +987,29 @@ function startActionBar() {
   actionBarTimer = setInterval(updateActionBar, 220);
 }
 
+// 9 syncs a second is the target. The loop reschedules itself as soon as the
+// previous answer lands, so a slow link costs one round trip per sync instead of
+// one round trip plus the rest of the interval. On a distant host that is the
+// difference between 2 and 4 updates a second for everyone else's characters.
+const SYNC_INTERVAL = 110;
+
 function startSync() {
-  clearInterval(syncTimer);
-  syncTimer = setInterval(syncTick, 110);
-  syncTick();
+  clearTimeout(syncTimer);
+  const generation = ++syncGeneration;
+  const step = async () => {
+    if (generation !== syncGeneration) return;
+    const started = performance.now();
+    await syncTick();
+    if (generation !== syncGeneration) return;
+    syncTimer = setTimeout(step, Math.max(0, SYNC_INTERVAL - (performance.now() - started)));
+  };
+  step();
+}
+
+function stopSync() {
+  syncGeneration += 1;
+  clearTimeout(syncTimer);
+  syncTimer = null;
 }
 
 let recoveringSession = false;
@@ -787,7 +1020,7 @@ async function recoverSession() {
   if (recoveringSession || !client?.code) return false;
   recoveringSession = true;
   try {
-    const data = await client.join(client.code, { player: characterPayload() });
+    const data = await client.join(client.code, { player: characterPayload(), session: account.token });
     if (!data) return false;
     session = session || {};
     world?.setSelf(data.playerId);
@@ -808,6 +1041,8 @@ async function syncTick() {
     world.applyPlayers(data.players || []);
     updateParty(data.players || []);
     updateFear(data.fear);
+    pendingTrade = data.trade || null;
+    gameUI?.setPendingTrade(pendingTrade);
     for (const message of data.messages || []) {
       if (message.seq > lastMessageSeq) {
         lastMessageSeq = message.seq;
@@ -890,6 +1125,8 @@ async function startSession(activeClient, data) {
   const log = $("chat-log");
   if (log) log.innerHTML = "";
   lastMessageSeq = 0;
+  welcomeShown = false;
+  welcomeUI.reset();
   chatTab = "all";
   chatChannel = "ic";
   document.querySelectorAll("#chat-tabs [data-tab]").forEach((button) => {
@@ -926,9 +1163,23 @@ async function startSession(activeClient, data) {
     const line = lines[npc.role] || lines.innkeeper;
     gameToast(`${npc.name} · ${npc.title} — "${line}"`, "");
     audio.chime();
+    // Props, not menus in the chat log: traders open the counter, couriers the
+    // contract board, mechanics the vehicle bay.
+    if (["trader", "attendant"].includes(npc.role)) gameUI?.open("market");
+    else if (["courier", "hauler"].includes(npc.role)) gameUI?.open("contracts");
+    else if (npc.role === "mechanic") openChest();
   };
   world.onAction = (action) => {
     sendChat(action === "draw" ? `/draw ${world?.weapon || "blade"}` : "/sheathe");
+  };
+  world.onAttack = () => resolveAttack();
+  world.onRaidExit = () => gameUI?.hideBoss();
+  world.onPlayerDown = () => {
+    gameUI?.hideBoss();
+    client?.boss("leave").then((data) => {
+      if (data?.profile) profile.apply(data.profile);
+    }).catch(() => { /* the gate resets either way */ });
+    audio.hurt();
   };
   world.onLockChange = (locked) => {
     if (locked) {
@@ -957,7 +1208,7 @@ async function startSession(activeClient, data) {
       onPause: () => { overlayOpen("pause") ? closeAllOverlays() : showOverlay("pause"); },
       onMap: () => toggleMap(),
       onSheet: () => { overlayOpen("sheet") ? hideOverlay("sheet") : (closeAllOverlays(), showOverlay("sheet")); },
-      onInventory: () => { chestOpen ? closeChest() : openChest(); },
+      onInventory: () => { toggleGamePanel("kit"); },
       onTvMode: () => toggleTvMode(),
     });
     world.gamepad.start();
@@ -968,11 +1219,45 @@ async function startSession(activeClient, data) {
   // Telefon, envanter ve load screen sistemlerini başlat
   await world.initSystems(data.playerId);
 
+  // The sheet is server-owned; the UI is rebuilt per session so a stale panel
+  // from the previous hall can never address the new room token.
+  world.setProfile(null);
+  pendingTrade = null;
+  setupGameUI();
+  profileUnsub?.();
+  profileUnsub = profile.onChange((state) => {
+    world?.setProfile(state.data);
+    updateScoreboard();
+  });
+  try {
+    const sheet = await client.profile("get");
+    profile.apply(sheet.profile);
+    gameUI.offers = sheet.offers || [];
+    gameUI.shop = sheet.shop || [];
+    world.setProfile(profile.data);
+    updateScoreboard();
+  } catch (error) {
+    console.warn("[aetherhold] profile unavailable", error);
+    gameToast("Sheet unavailable — gear will not save this session", "bad");
+  }
+
   // Yükleme ekranını güncelle
   if ($("loading-text")) $("loading-text").textContent = "Dünya yükleniyor…";
 
   world.start();
   showCenterOnJoin();
+  // If the welcome mod is not loaded, still greet the player privately.
+  setTimeout(() => {
+    if (welcomeShown || !session) return;
+    welcomeShown = true;
+    welcomeUI.show({
+      name: character.name,
+      cls: `${CLASSES[character.cls]?.icon || "✦"} ${character.cls || "Adventurer"}`,
+      tagline: t("welcome.tagline"),
+      tip: t("welcome.tip"),
+    });
+    audio.welcome();
+  }, 1600);
   updateParty(data.room?.players || []);
   (data.room?.messages || []).forEach((message) => {
     if (message.seq > lastMessageSeq) lastMessageSeq = message.seq;
@@ -1008,8 +1293,14 @@ async function startSession(activeClient, data) {
   }
   // The join click is a user gesture, so the browser may allow this immediately.
   setTimeout(() => {
+    // A touch screen cannot capture a mouse; mobile looks by dragging instead.
+    if (isMobileControlMode()) return;
     if (!overlayOpen("pause") && !overlayOpen("sheet") && !overlayOpen("help")) world?.requestLook();
   }, 250);
+
+  // Touch controls belong to the session: built with the world, torn down on
+  // leave. A desktop player never loads touch.js at all.
+  syncTouchControls();
 
   // Hide loading screen once the world is fully built and interactive.
   // The CSS transition owns the fade; the failsafe is cancelled here.
@@ -1019,13 +1310,21 @@ async function startSession(activeClient, data) {
 }
 
 async function leaveRoom(notice = "") {
+  welcomeUI.reset();
+  welcomeShown = false;
   world?.gamepad?.stop();
-  clearInterval(syncTimer);
-  syncTimer = null;
+  unmountTouchControls();
+  stopSync();
   clearInterval(actionBarTimer);
   actionBarTimer = null;
   closeChest();
   showTabList(false);
+  pendingTrade = null;
+  profileUnsub?.();
+  profileUnsub = null;
+  gameUI?.destroy();
+  gameUI = null;
+  profile.reset();
   clearInterval(fleetSyncTimer);
   fleetSyncTimer = null;
   worldMap?.dispose();
@@ -1068,12 +1367,12 @@ function updateScoreboard() {
   const serverEl = $("score-server");
   const footEl = $("score-foot");
   if (!levelEl) return;
-  if (levelEl) levelEl.textContent = String(character.stats.luck || 1);
+  if (levelEl) levelEl.textContent = String(profile.ready ? profile.level : (character.stats.luck || 1));
   if (moneyEl) {
-    const money = fleet?.cash ?? worldData?.currency ?? 0;
-    moneyEl.textContent = `${Math.round(Number(money) || 0)} ${currentCurrency()}`;
+    const money = profile.ready ? profile.cash : fleet?.cash ?? 0;
+    moneyEl.textContent = `${Math.round(Number(money) || 0)} ${profile.ready ? profile.currency : currentCurrency()}`;
   }
-  if (killsEl) killsEl.textContent = String((character.kills || 0));
+  if (killsEl) killsEl.textContent = String(profile.ready ? profile.kills : (character.kills || 0));
   if (serverEl && session?.code) {
     serverEl.textContent = session.code;
     footEl.textContent = t("hud.score.self") || (language === "tr" ? "Sen buradasın" : "You are here");
@@ -1267,6 +1566,7 @@ function hideOverlay(id) {
 }
 
 function closeAllOverlays() {
+  if (gameUI?.isOpen()) gameUI.close();
   ["pause", "sheet", "help"].forEach((id) => hideOverlay(id));
   $("map-overlay")?.classList.add("hidden");
   if (session && !overlayOpen("pause") && !overlayOpen("sheet") && !overlayOpen("help")) {
@@ -1421,6 +1721,7 @@ function bindOverlays() {
     if (!session) return;
     if (event.key === "Escape") {
       if (typing) return;
+      if (gameUI?.isOpen()) { gameUI.close(); event.preventDefault(); return; }
       if (overlayOpen("map-overlay")) { closeMap(); event.preventDefault(); return; }
       if (world?.locked) { world.releaseLook(); return; }
       if (overlayOpen("sheet") || overlayOpen("help") || overlayOpen("pause")) {
@@ -1444,18 +1745,28 @@ function bindOverlays() {
       event.preventDefault();
       if (overlayOpen("help")) hideOverlay("help");
       else { closeAllOverlays(); showOverlay("help"); }
-    } else if (key === "v") {
+    } else if (key === "z") {
       event.preventDefault();
-      world?.toggleView();
-    } else if (key === "r") {
-      event.preventDefault();
-      world?.toggleWeapon();
+      const meters = world?.hud?.cycleZoom?.();
+      if (meters) gameToast(`Radar · ${meters} m`, "");
     } else if (key === "tab") {
       event.preventDefault();
       showTabList(true);
     } else if (key === "i") {
       event.preventDefault();
-      chestOpen ? closeChest() : openChest();
+      toggleGamePanel("kit");
+    } else if (key === "j") {
+      event.preventDefault();
+      toggleGamePanel("market");
+    } else if (key === "o") {
+      event.preventDefault();
+      toggleGamePanel("contracts");
+    } else if (key === "y") {
+      event.preventDefault();
+      toggleGamePanel("trade");
+    } else if (key === "b") {
+      event.preventDefault();
+      enterBossGate();
     } else if (key === "t") {
       event.preventDefault();
       toggleTvMode();
@@ -1475,9 +1786,61 @@ function bindOverlays() {
 }
 
 // ── boot ────────────────────────────────────────────────────────────────
+// ── control mode (PC / mobile) ──────────────────────────────────────────
+// The class on <body> is the only switch: every touch-only rule in the
+// stylesheet lives under body.mobile-mode, so the desktop view is untouched.
+function applyControlMode() {
+  const mobile = isMobileControlMode();
+  document.body.classList.toggle("mobile-mode", mobile);
+  if (!mobile) document.body.classList.remove("touch-chat-open");
+  return mobile;
+}
+
+function openTouchChat() {
+  document.body.classList.add("touch-chat-open");
+  const input = $("chat-input");
+  if (!input) return;
+  setTimeout(() => input.focus({ preventScroll: true }), 60);
+}
+
+async function mountTouchControls() {
+  if (touchControls || !world || !applyControlMode()) return;
+  try {
+    const { TouchControls } = await import("./touch.js");
+    // The world can be torn down while the module loads.
+    if (!world || touchControls || !isMobileControlMode()) return;
+    touchControls = new TouchControls(world, {
+      onInteract: () => world?.interact(),
+      onView: () => world?.toggleView(),
+      onWeapon: () => world?.toggleWeapon(),
+      onMap: () => toggleMap(),
+      onChat: () => openTouchChat(),
+      onInventory: () => toggleGamePanel("kit"),
+      onAttack: () => world?.attack(),
+      onPause: () => { overlayOpen("pause") ? closeAllOverlays() : showOverlay("pause"); },
+    });
+    touchControls.start();
+  } catch (error) {
+    console.warn("[aetherhold] touch controls unavailable", error);
+  }
+}
+
+function unmountTouchControls() {
+  touchControls?.stop();
+  touchControls = null;
+  document.body.classList.remove("touch-chat-open");
+}
+
+function syncTouchControls() {
+  if (world && isMobileControlMode()) mountTouchControls();
+  else unmountTouchControls();
+}
+
 function boot() {
   // TV mode is persisted, so a couch session comes back the way it was left.
   if (settings.tv) document.body.classList.add("tv-mode");
+  // Phones get the joystick layout before the first menu frame is painted.
+  applyControlMode();
   resize();
   frame();
   applyCinematicLook();
@@ -1487,6 +1850,8 @@ function boot() {
     onEnter: (activeClient, data) => startSession(activeClient, data),
     onSettings: (payload) => {
       applyCinematicLook();
+      applyControlMode();
+      syncTouchControls();
       if (payload.settings && world) world.setSettings(settings);
       if (payload.character && world) world.setCharacter(character);
       if (payload.character) setHudCharacter();
@@ -1528,6 +1893,10 @@ function boot() {
       setTimeout(() => $("boot")?.classList.add("hidden"), 800);
       return;
     }
+    // Reclaim a remembered account before the menu is used, so the header
+    // chip and the client id are right from the first frame.
+    try { await menu.restoreAccount(); } catch { /* stay a guest */ }
+
     // A Turkish server greets a first-time visitor in Turkish; an explicit
     // choice on the client is never overridden afterwards.
     let saved = null;

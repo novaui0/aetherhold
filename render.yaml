@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: echo "no dependencies"
-    startCommand: python server.py --no-wizard --no-browser
+    startCommand: python server.py --no-wizard --no-browser --max-players 16 --slots 32
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION

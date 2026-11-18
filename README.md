@@ -84,6 +84,34 @@ couch layout: larger HUD type, 44 px targets and a wider chat column, so the
 screen reads from a sofa. [docs/CASTING.md](docs/CASTING.md) covers HDMI,
 Chromecast tab casting, Smart TV browsers, Steam Link and pairing a DualSense.
 
+### Phone
+
+Settings → Controls → **Control mode** can be set to **Mobile** (or left on
+**Auto**, which sniffs for a touch screen). Mobile mode adds a left joystick,
+drag-to-look on the canvas, six large action buttons (interact, weapon, view,
+map, chat, pause) and a compact HUD; the chat lives behind the 💬 button so it
+never covers the road. The desktop view is unchanged. A player who reached the
+game over the network can download the exact `server.py` from **Host Server →
+No server.py on this machine? Download it** (also `/download/server.py`).
+
+## Accounts and saved drivers
+
+The first time you enter a hall the game asks for an account. **Create account**
+takes a name (3–20 letters, numbers, `_ . -`) and a password of at least six
+characters; **Sign in** brings a driver back on any device that can reach the
+host. The header chip shows who is signed in — click it to sign out.
+
+Everything a driver earns lives in the host's SQLite file, keyed to the account:
+cash, gear, ammunition, contract progress, distance walked, shift time and boss
+bands — and the driver sheet itself (name, calling, appearance, history), so
+signing in on another device brings the same person back. Saving the Character
+panel pushes the sheet to the account. Passwords are stored as pbkdf2-hmac-sha256 with a per-account random salt;
+the browser keeps only a session token (30 days), never the password. The token
+is what joins a room, so a room cannot be entered without an account and the
+client id sent in the character payload is ignored in favour of the account id.
+
+Two accounts on one host have entirely separate profiles and fleets.
+
 ## The road
 
 The plaza is the hub; the region around it is what you drive. A ring highway
@@ -215,9 +243,19 @@ the same thing inline.
 | `/sheathe` | Put it away |
 | `/fear <reaction>` | Answer a drawn weapon in character |
 | `/look <name>` | Study someone's character sheet (private) |
+| `/tp <driver>` | Warp to another driver in the hall |
+| `/tp boss` | Warp straight into the boss gate (same as the gate key) |
+| `/tp spawn` | Back to the plaza |
+| `/tp garage\|fuel\|scrapyard\|camp\|warehouse\|tower` | Warp to a district stop |
+| `/tp <x> <z>` | Warp to map coordinates |
 | `/ooc <text>` | Speak as yourself, out of character |
 | `/rules` | Short reminder of the Codex |
 | `/who`, `/help` | Who is present; all commands |
+
+`/tp` is answered locally by `public/js/teleport.js`: the warp moves the driver
+immediately and the next sync tells the host, so everyone in the hall sees the
+arrival. `/tp boss` is the exception — it opens the server-owned raid through
+`POST /api/rooms/<code>/boss`.
 
 ### Character
 
@@ -371,9 +409,14 @@ it, so treat the printed URL as a password.
 | `GET /api/world` | Road graph, places, roads, vehicles and climate |
 | `GET/POST /api/fleet` | Read and act on a parked fleet (refuel, repair, travel, cargo) |
 | `GET /api/codex` | The written world logic, table law, terms and commands |
+| `POST /api/register` | Create an account; returns the session token and client id |
+| `POST /api/login` | Sign in; returns a fresh session token |
+| `POST /api/session` | Validate a remembered token and return the account |
+| `POST /api/logout` | Revoke the session token |
+| `POST /api/character` | Read or save the account's driver sheet (`action: get\|save`) |
 | `GET /api/rooms` | Public room list |
-| `POST /api/rooms` | Create a room and join it |
-| `POST /api/rooms/<code>/join` | Join, with optional password and character sheet |
+| `POST /api/rooms` | Create a room and join it (needs `session`) |
+| `POST /api/rooms/<code>/join` | Join with the account `session`, optional password and character sheet |
 | `POST /api/rooms/<code>/sync` | Push pose, head look, pitch, animation; pull players, fear state and messages |
 | `POST /api/rooms/<code>/chat` | Chat, OOC, dice, emotes, `/try`, weapons, `/look` (rate limited) |
 | `POST /api/rooms/<code>/leave` | Leave the hall |
@@ -439,7 +482,7 @@ new `loadscreenSequence` test in `public/js/test-loadscreen.js`.
 ```
 server.py              host/connect modes, room API, Codex, moderation, admin panel
 public/index.html      menu markup, HUD, chat, overlays, boot and loading screen elements, boot and loading screen elements
-public/css/            the look: style.css plus loadscreen.css for the in-game loader
+public/css/            the look: style.css, loadscreen.css and auth.css for the account gate
 public/js/main.js      bootstrap, session lifecycle, chat channels, fear prompts, startup tests, startup tests
 public/js/menu.js      menu panels, character sheet editor, codex, room browser
 public/js/world.js     three.js plaza, movement, mouse/head look, camera modes, env map
@@ -447,7 +490,9 @@ public/js/region.js    ring highway, stops, street furniture, vehicles
 public/js/worldmap.js  road map with fog of war and travel
 public/js/character.js articulated humanoid avatars, faces, props, animation
 public/js/backdrop.js  animated menu diorama
-public/js/net.js       API client
+public/js/net.js       API client, including register/login/session calls
+public/js/auth.js      account state, the sign-in overlay and the header chip
+public/js/teleport.js  the /tp command (drivers, stops, boss gate, coordinates)
 public/js/store.js     classes, palettes, character defaults, persistence
 public/js/audio.js     procedural ambience, interface sounds and the music playlist
 public/js/loadscreen.js  in-game loading overlay shown between menu and world

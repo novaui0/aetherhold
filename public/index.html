@@ -6,6 +6,8 @@
 <meta name="theme-color" content="#07070d" />
 <title>Aetherhold — 3D Chat &amp; Roleplay</title>
 <link rel="stylesheet" href="/css/style.css" />
+<link rel="stylesheet" href="/css/loadout.css" />
+<link rel="stylesheet" href="/css/auth.css" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230b0b16'/%3E%3Cpath d='M32 8l6 18 18 6-18 6-6 18-6-18-18-6 18-6z' fill='%23f4c46b'/%3E%3C/svg%3E" />
 </head>
 <body>
@@ -49,6 +51,13 @@
         <p class="tagline">A 3D chat <span>&amp;</span> roleplay realm</p>
       </div>
       <div class="brand-meta">
+        <button class="account-chip" id="account-chip" type="button" aria-haspopup="dialog">
+          <span class="account-dot" aria-hidden="true"></span>
+          <span class="account-text">
+            <strong class="account-name">Sign in</strong>
+            <em class="account-sub">keep your driver on the host</em>
+          </span>
+        </button>
         <div class="lang-switch" role="group" aria-label="Language">
           <button class="lang-btn active" data-language="en">EN</button>
           <button class="lang-btn" data-language="tr">TR</button>
@@ -236,8 +245,8 @@
 
               <div class="field-row">
                 <div class="field-group tight">
-                  <label for="host-max">Max players <span class="value" id="host-max-value">8</span></label>
-                  <input id="host-max" type="range" min="2" max="16" value="8" />
+                  <label for="host-max">Max players <span class="value" id="host-max-value">16</span></label>
+                  <input id="host-max" type="range" min="2" max="32" value="16" />
                 </div>
                 <div class="field-group tight">
                   <label for="host-password">Password <span class="muted">(optional)</span></label>
@@ -274,6 +283,15 @@
                   <svg><use href="#i-copy"/></svg><span>Copy</span>
                 </button>
               </div>
+              <!-- Shown only when the page is served from another machine: a local
+                   player already has server.py next to them. -->
+              <a class="download-server hidden" id="download-server" href="/download/server.py" download="server.py">
+                <svg><use href="#i-copy"/></svg>
+                <span data-i18n="host.download">No server.py on this machine? Download it</span>
+              </a>
+              <p class="muted small hidden" id="download-server-hint" data-i18n="host.download.hint">
+                Every server feature lives in this single file — Python 3.9+, no dependencies.
+              </p>
               <div class="host-facts">
                 <div><span>Current host</span><strong id="host-current">—</strong></div>
                 <div><span>Your address</span><strong id="host-address">—</strong></div>
@@ -520,6 +538,15 @@
 
             <div class="card">
               <h3>Controls &amp; Audio</h3>
+              <div class="field-group tight">
+                <label data-i18n="settings.mode">Control mode</label>
+                <div class="segmented" id="control-mode-seg">
+                  <button data-mode="auto" class="active" data-i18n="settings.mode.auto">Auto</button>
+                  <button data-mode="pc" data-i18n="settings.mode.pc">PC</button>
+                  <button data-mode="mobile" data-i18n="settings.mode.mobile">Mobile</button>
+                </div>
+                <p class="hint" data-i18n="settings.mode.hint">Mobile adds a joystick, drag-to-look and touch buttons. PC keeps keyboard and mouse.</p>
+              </div>
               <div class="slider-row">
                 <label for="set-sens">Camera sensitivity <span class="value" id="set-sens-value">1.0×</span></label>
                 <input type="range" id="set-sens" min="20" max="250" step="5" value="100" />
@@ -849,7 +876,7 @@
       <div class="divider"></div>
       <div class="help-rules" id="help-rules"></div>
       <div class="divider"></div>
-      <p class="muted small">Chat commands: <code>/ooc</code> · <code>/me</code> · <code>/try</code> · <code>/draw</code> · <code>/fear</code> · <code>/look &lt;name&gt;</code> · <code>/roll 2d6+1</code> · <code>/rules</code></p>
+      <p class="muted small">Chat commands: <code>/ooc</code> · <code>/me</code> · <code>/try</code> · <code>/draw</code> · <code>/fear</code> · <code>/look &lt;name&gt;</code> · <code>/roll 2d6+1</code> · <code>/tp &lt;driver|boss|place|x z&gt;</code> · <code>/rules</code></p>
     </div>
   </div>
   <!-- Chest GUI: the market / cargo window -->
@@ -905,6 +932,47 @@
     </div>
   </div>
 </main>
+
+<!-- ══════════════════════ ACCOUNT GATE ══════════════════════ -->
+<div id="auth-overlay" class="auth-overlay hidden">
+  <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <button class="auth-close" id="auth-close" type="button" aria-label="Close">×</button>
+    <div class="auth-crest" aria-hidden="true">
+      <svg viewBox="0 0 64 64"><path d="M32 4l6.5 19.5L58 30l-19.5 6.5L32 56l-6.5-19.5L6 30l19.5-6.5z"/></svg>
+    </div>
+    <span class="auth-kicker" data-i18n="auth.kicker">The realm remembers</span>
+    <h2 id="auth-title">Sign in</h2>
+    <p class="auth-lede" id="auth-lede">Your driver lives on the host — cash, gear and boss bands follow the account.</p>
+    <p class="auth-reason hidden" id="auth-reason"></p>
+
+    <div class="auth-tabs" id="auth-tabs" role="tablist">
+      <button type="button" class="active" data-auth-tab="login" role="tab" data-i18n="auth.tabLogin">Sign in</button>
+      <button type="button" data-auth-tab="register" role="tab" data-i18n="auth.tabRegister">Create account</button>
+    </div>
+
+    <form id="auth-form" class="auth-form" autocomplete="on" novalidate>
+      <label class="auth-field">
+        <span data-i18n="auth.username">Username</span>
+        <input id="auth-user" name="username" type="text" maxlength="20" autocomplete="username"
+               spellcheck="false" placeholder="wanderer" />
+      </label>
+      <label class="auth-field">
+        <span data-i18n="auth.password">Password</span>
+        <input id="auth-pass" name="password" type="password" maxlength="128"
+               autocomplete="current-password" placeholder="••••••" />
+      </label>
+      <label class="auth-field hidden" id="auth-confirm-row">
+        <span data-i18n="auth.confirm">Confirm password</span>
+        <input id="auth-confirm" name="confirm" type="password" maxlength="128"
+               autocomplete="new-password" placeholder="••••••" />
+      </label>
+      <p class="auth-error hidden" id="auth-error" role="alert"></p>
+      <button type="submit" class="auth-submit" id="auth-submit">Sign in</button>
+    </form>
+
+    <p class="auth-foot" data-i18n="auth.foot">The host stores the account; passwords are salted and hashed, never kept in the browser.</p>
+  </div>
+</div>
 
 <div id="boot" class="boot hidden">
   <div class="boot-crest">

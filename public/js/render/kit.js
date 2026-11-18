@@ -203,6 +203,8 @@ export function roundedBox(width, height, depth, radius = 0.06, options = {}) {
   geometry.translate(0, -centerY, 0);
   const result = creasedNormals(geometry, options.crease ?? Math.PI / 4.2);
   planarUV(result, options.uvScale ?? 1);
+  // Cached solids outlive one district: never let a merge pass free them.
+  result.userData.cached = true;
   boxCache.set(cacheKey, result);
   return result;
 }
@@ -559,6 +561,9 @@ export function createMaterials() {
   const materials = {};
   const registry = [];
   const keep = (material) => {
+    // Session-shared materials: a district must never dispose one of these on
+    // leave, or the next district renders vehicles and props without textures.
+    material.userData.shared = true;
     registry.push(material);
     return material;
   };
@@ -815,7 +820,8 @@ export function mergeByMaterial(root) {
     }
     target.offset = write;
     object.parent?.remove(object);
-    geometry.dispose();
+    // Cached kit geometries are reused by the next district in this session.
+    if (!geometry.userData?.cached) geometry.dispose();
   }
 
   for (const [material, buffer] of buffers) {
@@ -841,6 +847,19 @@ let materialSingleton = null;
 export function kitMaterials() {
   if (!materialSingleton) materialSingleton = createMaterials();
   return materialSingleton;
+}
+
+// Disposal is a page-lifetime event, never a district one. Districts come and
+// go with every room you join; the concrete, chrome and car paint do not.
+export function resetKitMaterials() {
+  if (!materialSingleton) return;
+  materialSingleton.disposeAll();
+  materialSingleton = null;
+  boxCache.clear();
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => resetKitMaterials());
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────

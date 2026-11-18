@@ -15,17 +15,21 @@ import {
 import { createCar, createTrafficCar, spinWheels } from "./vehicles.js";
 import { createNpcRecord } from "./region.js";
 import { buildInterior } from "./interior.js";
+import { buildThemedInterior } from "./interiors.js";
+import { Traffic } from "./traffic.js";
 
 const TAU = Math.PI * 2;
 
 export const AVE_HALF = 12;
-export const CROSS_STREETS = [-78, -26, 26, 78];
+export const CROSS_STREETS = [-140, -78, -26, 26, 78, 140];
 export const CROSS_HALF = 10;
-export const CITY_EDGE = { x: 120, z: 76 };
+// Twice the old footprint: a residential west row, a harbour east row and a
+// market back street south of the boulevard.
+export const CITY_EDGE = { x: 180, z: 110 };
 
 const STREETS = {
   avenue: "VINEWOOD BLVD",
-  cross: ["ALTA ST", "POWER ST", "MISSION ROW", "ELGIN AVE"],
+  cross: ["WESTGATE", "ALTA ST", "POWER ST", "MISSION ROW", "ELGIN AVE", "HARBOR WAY"],
 };
 
 const BLOCKS = [
@@ -39,6 +43,18 @@ const BLOCKS = [
   { x0: -16, x1: 16, z0: -68, z1: -12, kind: "shops" },
   { x0: 36, x1: 68, z0: -68, z1: -12, kind: "fuel" },
   { x0: 88, x1: 118, z0: -68, z1: -12, kind: "diner" },
+  // ── west residential row ──
+  { x0: -176, x1: -146, z0: 12, z1: 68, kind: "houses" },
+  { x0: -176, x1: -146, z0: -68, z1: -12, kind: "houses" },
+  // ── east harbour row ──
+  { x0: 146, x1: 176, z0: 12, z1: 68, kind: "harbor" },
+  { x0: 146, x1: 176, z0: -68, z1: -12, kind: "harbor" },
+  // ── south market back street ──
+  { x0: -68, x1: -36, z0: -104, z1: -80, kind: "alley" },
+  { x0: 36, x1: 68, z0: -104, z1: -80, kind: "alley" },
+  // ── north back gardens ──
+  { x0: -68, x1: -36, z0: 80, z1: 104, kind: "park" },
+  { x0: 36, x1: 68, z0: 80, z1: 104, kind: "park" },
 ];
 
 export class City {
@@ -66,6 +82,10 @@ export class City {
     this.time = 0;
     this.inside = false;
     this.interior = null;
+    this.blocks = BLOCKS;
+    this.doors = [];
+    this.interiors = new Map();
+    this.doorMarkers = [];
     this.truck = null;
     this.neonSigns = [];
 
@@ -79,8 +99,9 @@ export class City {
     this._buildSkyline();
     this._buildStreetFurniture();
     this._buildTraffic();
-    this._buildInterior();
     this._spawnVehicle();
+    this._buildDoors();
+    this.traffic = new Traffic(this);
 
     mergeByMaterial(this.statics);
     console.info("[city] merge", Math.round(performance.now() - __t));
@@ -289,6 +310,9 @@ export class City {
       }
 
       const builder = {
+        houses: () => this._housesBlock(block),
+        harbor: () => this._harborBlock(block),
+        alley: () => this._alleyBlock(block),
         park: () => this._parkBlock(block),
         brick: () => this._brickBlock(block),
         tower: () => this._towerBlock(block),
@@ -312,6 +336,7 @@ export class City {
       x, z, w, d, floors, floorHeight = 3.7, material = M.brick, facing = "south",
       storefront = true, sign = null, signColor, awning = null, rooftop = true,
       fireEscape = false, balconies = false, collider = true,
+      interior = "shop", doorName = null, doorId = null,
     } = config;
 
     const height = floors * floorHeight;
@@ -451,6 +476,16 @@ export class City {
     if (collider) {
       this.boxes.push({ x, z, hx: w / 2 + 0.3, hz: d / 2 + 0.3 });
     }
+    if (interior !== false) {
+      const label = doorName || (Array.isArray(sign) ? sign[0] : sign) || "THE DOOR";
+      this._registerDoor({
+        id: doorId || `door-${this.doors.length}`,
+        name: label,
+        template: interior || "shop",
+        x,
+        z: z + faceZ + dir * 1.7,
+      });
+    }
     return { root, height, width: w, depth: d };
   }
 
@@ -549,10 +584,12 @@ export class City {
       x: block.x0 + 16, z: block.z0 + 16, w: 28, d: 26, floors: 6,
       material: M.brick, facing: "south", sign: ["HARROW & SONS", "HARDWARE · SINCE 1974"],
       signColor: "#ffd9a0", awning: "#2f4a3a", fireEscape: true,
+      interior: "shop", doorName: "HARROW & SONS",
     });
     this._building({
       x: block.x0 + 16, z: block.z0 + 42, w: 28, d: 16, floors: 4,
       material: M.plaster, facing: "south", sign: ["ELGIN LAUNDRY"], signColor: "#ffb3c6",
+      interior: "shop", doorName: "ELGIN LAUNDRY",
     });
   }
 
@@ -562,6 +599,7 @@ export class City {
       x: block.x0 + 14, z: block.z0 + 20, w: 30, d: 34, floors: 13, floorHeight: 3.8,
       material: M.concrete, facing: "south", sign: ["MAZE BANK", "TOWER · LEVELS 1–20"],
       signColor: "#9fd0ff", storefront: true,
+      interior: "bank", doorName: "MAZE BANK",
     });
     // Vertical fins: the signature of a modern curtain-wall tower.
     for (let i = 0; i < 9; i += 1) {
@@ -590,6 +628,7 @@ export class City {
       x: block.x0 + 16, z: block.z0 + 20, w: 30, d: 34, floors: 6,
       material: M.plaster, facing: "south", sign: ["THE AURELIA", "RESIDENCES · APARTMENTS 4A–7C"],
       signColor: "#ffd9a0", balconies: true, collider: false,
+      interior: "apartment", doorName: "THE AURELIA",
     });
     // Entrance bay: canopy, steps, brass door, wall lamps.
     const faceZ = -17;
@@ -622,12 +661,130 @@ export class City {
     });
   }
 
+  // ── new neighbourhoods ───────────────────────────────────────────────
+  _housesBlock(block) {
+    for (let i = 0; i < 4; i += 1) {
+      const x = block.x0 + 8 + (i % 2) * 15;
+      const z = block.z0 + 9 + Math.floor(i / 2) * 26;
+      this._house(x, z, `${block.x0}:${block.z0}:${i}`);
+    }
+  }
+
+  _house(x, z, key) {
+    const M = this.materials;
+    const palette = ["#7a5a44", "#8d6b52", "#6b5848", "#9b7a5e", "#5f6b62", "#7c6a80"][
+      Math.abs(key.split("").reduce((sum, ch) => sum + ch.charCodeAt(0), 0)) % 6
+    ];
+    const wall = M.carPaint(palette);
+    // Garden plate, fence and path.
+    addMesh(this.statics, roundedBox(13, 0.12, 17, 0.3), M.grass, [x, 0.24, z]);
+    addMesh(this.statics, roundedBox(2.0, 0.13, 5.0, 0.2), M.sidewalk, [x, 0.26, z - 8.2]);
+    for (let i = 0; i < 7; i += 1) {
+      const fx = x - 6 + i * 2;
+      addMesh(this.statics, roundedBox(0.1, 0.75, 0.1, 0.03), M.woodDark, [fx, 0.62, z - 8.4]);
+    }
+    addMesh(this.statics, roundedBox(13, 0.07, 0.08, 0.02), M.woodDark, [x, 0.95, z - 8.4]);
+
+    // House body with a pitched roof.
+    addMesh(this.statics, roundedBox(9, 3.4, 8, 0.35), wall, [x, 1.95, z]);
+    addMesh(this.statics, roundedBox(9.3, 0.3, 8.3, 0.2), M.trim, [x, 3.7, z]);
+    for (const side of [-1, 1]) {
+      addMesh(this.statics, roundedBox(9.6, 0.24, 5.3, 0.16), M.roof,
+        [x, 4.85, z + side * 2.1], [side * 0.5, 0, 0]);
+    }
+    addMesh(this.statics, roundedBox(9.7, 0.16, 0.24, 0.05), M.trim, [x, 5.9, z]);
+    addMesh(this.statics, roundedBox(0.8, 1.1, 0.8, 0.1), M.brick, [x + 2.8, 5.4, z - 1.6]);
+
+    // Door and two lit windows on the street face.
+    addMesh(this.statics, roundedBox(1.25, 2.25, 0.16, 0.05), M.darkTrim, [x - 1.4, 1.35, z - 4.06]);
+    addMesh(this.statics, roundedBox(1.05, 2.1, 0.1, 0.04), M.woodDark, [x - 1.4, 1.3, z - 4.12]);
+    [-1, 1].forEach((side) => {
+      addMesh(this.statics, roundedBox(1.45, 1.0, 0.12, 0.04), M.darkTrim, [x + side * 2.7, 2.35, z - 4.06]);
+      addMesh(this.statics, roundedBox(1.25, 0.82, 0.06, 0.03), M.windowLit, [x + side * 2.7, 2.35, z - 4.12]);
+    });
+    // Porch lamp.
+    addMesh(this.statics, roundedBox(0.22, 0.3, 0.22, 0.05), M.lampWarm, [x + 0.5, 2.5, z - 4.3]);
+    // Garden tree and a flower bed.
+    this._tree(x - 4.2, z + 5.2, 0.7, 0.28);
+    addMesh(this.statics, roundedBox(4.6, 0.3, 1.2, 0.2), M.stone, [x + 2.6, 0.34, z + 5.6]);
+    for (let i = 0; i < 5; i += 1) {
+      addMesh(this.statics, roundedBox(0.34, 0.32, 0.34, 0.08), M.foliage,
+        [x + 0.8 + i * 0.95, 0.55, z + 5.6]);
+    }
+    this.boxes.push({ x, z, hx: 4.8, hz: 4.3 });
+    const number = String(1 + Math.abs(key.length + key.charCodeAt(0)) % 8).padStart(2, "0");
+    this._registerDoor({
+      id: `house-${key}`,
+      name: `HOUSE ${number}`,
+      template: "house",
+      x: x - 1.4,
+      z: z - 5.0,
+    });
+  }
+
+  _harborBlock(block) {
+    const M = this.materials;
+    this._building({
+      x: block.x0 + 15, z: block.z0 + 22, w: 26, d: 30, floors: 2, floorHeight: 4.4,
+      material: M.concrete, facing: "south", sign: ["HARBOUR DEPOT", "BERTHS 4–9 · CUSTOMS"],
+      signColor: "#9fd0ff", storefront: false, interior: "warehouse", doorName: "HARBOUR DEPOT",
+    });
+    // Containers in stacks down the street edge.
+    const colors = ["#7d1f22", "#2c4d63", "#4d5a45", "#c9a227", "#5b2a43"];
+    for (let i = 0; i < 6; i += 1) {
+      const cx = block.x0 + 4 + (i % 2) * 6;
+      const cz = block.z0 + 45 + Math.floor(i / 2) * 8;
+      const stack = 1 + (i % 2);
+      for (let level = 0; level < stack; level += 1) {
+        addMesh(this.statics, roundedBox(5.6, 2.3, 2.3, 0.16), M.carPaint(colors[i % colors.length]),
+          [cx, 0.24 + 1.15 + level * 2.36, cz]);
+      }
+      this.boxes.push({ x: cx, z: cz, hx: 3.0, hz: 1.4 });
+    }
+    // Crane: a mast, a jib and a hook.
+    addMesh(this.statics, roundedBox(1.0, 13, 1.0, 0.2), M.paintYellow, [block.x0 + 4, 6.7, block.z0 + 36]);
+    addMesh(this.statics, roundedBox(12, 0.7, 0.8, 0.15), M.paintYellow, [block.x0 + 9, 12.8, block.z0 + 36]);
+    addMesh(this.statics, roundedBox(0.06, 4.2, 0.06, 0.02), M.steel, [block.x0 + 14.4, 10.6, block.z0 + 36]);
+    addMesh(this.statics, roundedBox(0.7, 0.5, 0.7, 0.1), M.iron, [block.x0 + 14.4, 8.4, block.z0 + 36]);
+    // Bollards and a painted berth line.
+    for (let i = 0; i < 4; i += 1) {
+      addMesh(this.statics, roundedBox(0.4, 0.8, 0.4, 0.1), M.iron, [block.x0 + 3, 0.64, block.z0 + 10 + i * 4]);
+    }
+    addMesh(this.statics, roundedBox(0.24, 0.04, 44, 0.02), M.paintWhite, [block.x0 + 1.4, 0.28, block.z0 + 30]);
+  }
+
+  _alleyBlock(block) {
+    const M = this.materials;
+    this._building({
+      x: block.x0 + 16, z: block.z0 + 9, w: 22, d: 10, floors: 2, floorHeight: 3.6,
+      material: M.brick, facing: "north", sign: ["NIGHT MARKET", "SPICES · PARTS · RUMOURS"],
+      signColor: "#ffd166", storefront: true, interior: "shop", doorName: "NIGHT MARKET",
+    });
+    // Stalls under a string of bulbs.
+    for (let i = 0; i < 4; i += 1) {
+      const sx = block.x0 + 4 + i * 6;
+      const sz = block.z0 + 19;
+      addMesh(this.statics, roundedBox(4.4, 0.9, 2.2, 0.12), M.woodDark, [sx, 0.9, sz]);
+      addMesh(this.statics, roundedBox(4.7, 0.12, 2.5, 0.06), M.wood, [sx, 1.4, sz]);
+      [-1, 1].forEach((side) => {
+        addMesh(this.statics, roundedBox(0.1, 2.6, 0.1, 0.03), M.iron, [sx + side * 2.1, 1.55, sz + 0.9]);
+      });
+      addMesh(this.statics, roundedBox(4.5, 0.1, 2.3, 0.04), M.carPaint(["#7d1f22", "#2c4d63", "#4d5a45", "#c9a227"][i]), [sx, 2.9, sz], [-0.12, 0, 0]);
+      addMesh(this.statics, roundedBox(0.3, 0.3, 0.3, 0.05), M.lampWarm, [sx, 2.5, sz + 0.4]);
+      this.boxes.push({ x: sx, z: sz, hx: 2.3, hz: 1.2 });
+    }
+    for (let i = 0; i < 12; i += 1) {
+      addMesh(this.statics, roundedBox(0.09, 0.09, 0.09, 0.03), M.lampWarm, [block.x0 + 2 + i * 2.1, 3.3, block.z0 + 18]);
+    }
+  }
+
   _warehouseBlock(block) {
     const M = this.materials;
     const hall = this._building({
       x: block.x0 + 15, z: block.z0 + 23, w: 26, d: 38, floors: 3, floorHeight: 4.6,
       material: M.concrete, facing: "south", sign: ["PORT ELGIN FREIGHT", "LOADING BAYS 1–6 · NO PARKING"],
       signColor: "#cfd8e3", storefront: false,
+      interior: "warehouse", doorName: "PORT ELGIN FREIGHT",
     });
     // Roller doors and dock levellers.
     for (let i = 0; i < 3; i += 1) {
@@ -651,6 +808,7 @@ export class City {
       x: block.x0 + 16, z: block.z0 + 22, w: 30, d: 24, floors: 3, floorHeight: 4.2,
       material: M.concrete, facing: "north", sign: ["REDLINE AUTOMOTIVE", "SERVICE · TUNING · BODY"],
       signColor: "#ff8a5c", storefront: true, awning: "#7d1f22",
+      interior: "garage", doorName: "REDLINE",
     });
     // Open service bays with a car on a lift inside one of them.
     for (let i = 0; i < 2; i += 1) {
@@ -684,11 +842,13 @@ export class City {
       x: block.x0 + 14, z: block.z0 + 44, w: 26, d: 18, floors: 3, floorHeight: 4.0,
       material: M.brick, facing: "north", sign: ["AMMU-NATION", "FIREARMS · AMMO · LICENSE"],
       signColor: "#ff6b6b", storefront: true,
+      interior: "shop", doorName: "AMMU-NATION",
     });
     this._building({
       x: block.x0 + 14, z: block.z0 + 14, w: 26, d: 18, floors: 2, floorHeight: 4.4,
       material: M.plaster, facing: "north", sign: ["MISSION ROW MARKET", "GROCERIES · 24 HOURS"],
       signColor: "#a9f0c0", awning: "#2f6b4a", storefront: true,
+      interior: "shop", doorName: "MISSION ROW MARKET",
     });
     // Billboard on the pavement.
     const billboard = this._billboard(block.x0 + 26, block.z0 + 6, ["CLUCKIN' BELL", "NOW HIRING — ASK INSIDE"], "#ffd166");
@@ -732,6 +892,7 @@ export class City {
       x: block.x0 + 30, z: block.z0 + 10, w: 14, d: 12, floors: 2, floorHeight: 3.4,
       material: M.plaster, facing: "north", sign: ["GO-GO FUEL", "MINI MART · COFFEE"],
       signColor: "#ffd166", storefront: true,
+      interior: "kiosk", doorName: "GO-GO MINI MART",
     });
     const light = new THREE.PointLight(0xd6ebff, 60, 34, 2);
     light.position.set(block.x0 + 16, 5.0, block.z0 + 34);
@@ -748,6 +909,7 @@ export class City {
       x: block.x0 + 14, z: block.z0 + 43, w: 24, d: 18, floors: 2, floorHeight: 3.9,
       material: M.paintWhite, facing: "north", sign: ["THE SPOON", "DINER · OPEN ALL NIGHT"],
       signColor: "#ff70a6", storefront: true, awning: "#8a1f4a",
+      interior: "diner", doorName: "THE SPOON",
     });
     const neon = new THREE.Mesh(roundedBox(20, 0.18, 0.18, 0.06), M.neonPink);
     neon.position.set(0, 8.2, -9.2);
@@ -846,7 +1008,7 @@ export class City {
   // ── street life ───────────────────────────────────────────────────────
   _buildStreetFurniture() {
     // Lamps down both sides of the boulevard.
-    for (let x = -112; x <= 112; x += 24) {
+    for (let x = -168; x <= 168; x += 24) {
       [-1, 1].forEach((side) => {
         const z = side * (AVE_HALF + 1.6);
         if (CROSS_STREETS.some((c) => Math.abs(x - c) < 11)) return;
@@ -862,7 +1024,7 @@ export class City {
     });
     // Hydrants, bins, benches, bollards along the avenue.
     for (let i = 0; i < 14; i += 1) {
-      const x = -104 + i * 15.4;
+      const x = -160 + i * 15.4;
       const side = i % 2 ? 1 : -1;
       const z = side * (AVE_HALF + 2.4);
       if (CROSS_STREETS.some((c) => Math.abs(x - c) < 12)) continue;
@@ -1135,7 +1297,7 @@ export class City {
       const radius = 190 + Math.random() * 150;
       const x = Math.cos(angle) * radius;
       const z = Math.sin(angle) * radius * 0.8;
-      if (Math.abs(x) < 130 && Math.abs(z) < 120) continue;
+      if (Math.abs(x) < 192 && Math.abs(z) < 132) continue;
       const height = 28 + Math.random() * 86;
       const w = 14 + Math.random() * 22;
       const d = 14 + Math.random() * 20;
@@ -1171,10 +1333,93 @@ export class City {
     return site;
   }
 
-  _buildInterior() {
-    this.interior = buildInterior(this.materials);
-    this.scene.add(this.interior.group);
+  // ── doors & interiors ─────────────────────────────────────────────────
+  // Every building registers its street door here. Interiors are built lazily
+  // on first entry and cached, so a district with nineteen doors costs one
+  // room of geometry until somebody actually walks in.
+  _registerDoor(door) {
+    if (!door || !door.id) return null;
+    if (this.doors.some((entry) => entry.id === door.id)) return null;
+    const record = {
+      id: door.id,
+      name: door.name || door.id,
+      template: door.template || "shop",
+      x: door.x, z: door.z,
+      radius: 3.4,
+    };
+    this.doors.push(record);
+    return record;
   }
+
+  _buildDoors() {
+    // One shared "E" texture for every threshold: cheap and readable.
+    const element = document.createElement("canvas");
+    element.width = 128;
+    element.height = 128;
+    const ctx = element.getContext("2d");
+    ctx.clearRect(0, 0, 128, 128);
+    ctx.beginPath();
+    ctx.arc(64, 64, 52, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(10,10,18,0.82)";
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "rgba(242,201,125,0.85)";
+    ctx.stroke();
+    ctx.font = "700 54px Inter, Segoe UI, sans-serif";
+    ctx.fillStyle = "#ffe9b8";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(242,201,125,0.9)";
+    ctx.shadowBlur = 16;
+    ctx.fillText("E", 64, 66);
+    const texture = new THREE.CanvasTexture(element);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const material = new THREE.SpriteMaterial({
+      map: texture, transparent: true, depthTest: true, depthWrite: false,
+    });
+    const ringGeometry = new THREE.RingGeometry(0.55, 0.78, 24);
+    const ringMaterial = new THREE.MeshBasicMaterial({
+      color: 0xf2c97d, transparent: true, opacity: 0.5, side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    for (const door of this.doors) {
+      const ring = new THREE.Mesh(ringGeometry, ringMaterial.clone());
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(door.x, 0.035, door.z);
+      ring.renderOrder = 2;
+      this.statics.add(ring);
+      const sprite = new THREE.Sprite(material.clone());
+      sprite.scale.set(0.62, 0.62, 1);
+      sprite.position.set(door.x, 1.45, door.z);
+      sprite.renderOrder = 9;
+      this.dynamic.add(sprite);
+      this.doorMarkers.push({ door, ring, sprite, phase: Math.random() * Math.PI * 2 });
+    }
+  }
+
+  enterBuilding(id) {
+    const door = this.doors.find((entry) => entry.id === id);
+    if (!door) return null;
+    let room = this.interiors.get(door.id);
+    if (!room) {
+      room = door.template === "apartment"
+        ? buildInterior(this.materials)
+        : buildThemedInterior(door.template, this.interiors.size, this.materials);
+      room.name = door.name;
+      room.exitOutside = { x: door.x, z: door.z };
+      room.entrance = { x: door.x, z: door.z };
+      room.doorId = door.id;
+      this.scene.add(room.group);
+      this.interiors.set(door.id, room);
+    }
+    this.inside = true;
+    this.interior = room;
+    room.group.visible = true;
+    return room.spawn;
+  }
+
+  // The Aurelia apartment still uses its bespoke room; it is built lazily in
+  // enterBuilding() like every other door.
 
   _buildTraffic() {
     // Parked along the boulevard: the strongest cue that this is a living city.
@@ -1252,6 +1497,19 @@ export class City {
     return best;
   }
 
+  nearDoor(x, z) {
+    let best = null;
+    let bestDistance = 3.4;
+    for (const door of this.doors) {
+      const distance = Math.hypot(x - door.x, z - door.z);
+      if (distance < bestDistance) {
+        best = door;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
   nearInteriorEntrance(x, z) {
     const door = this.interior?.entrance;
     if (!door) return null;
@@ -1261,20 +1519,33 @@ export class City {
   nearInteriorExit(x, z) {
     const door = this.interior?.exit;
     if (!door) return null;
-    return Math.hypot(x - door.x, z - door.z) < 2.4 ? door : null;
+    return Math.hypot(x - door.x, z - door.z) < 2.8 ? door : null;
   }
 
   enterInterior() {
-    if (!this.interior) return null;
-    this.inside = true;
-    this.interior.group.visible = true;
-    return this.interior.spawn;
+    const door = this.nearDoor(this._lastPlayerX ?? 0, this._lastPlayerZ ?? 0)
+      || this.doors.find((entry) => entry.template === "apartment");
+    return door ? this.enterBuilding(door.id) : null;
   }
 
   exitInterior() {
+    const room = this.interior;
+    if (!room) return { x: 0, z: 6 };
     this.inside = false;
-    this.interior.group.visible = false;
-    return this.interior.exitOutside;
+    room.group.visible = false;
+    this.interior = null;
+    return room.exitOutside || { x: 52, z: 13.4 };
+  }
+
+  get edge() {
+    return { x: CITY_EDGE.x - 2, z: CITY_EDGE.z - 2 };
+  }
+
+  clamp(x, z) {
+    return {
+      x: Math.max(-this.edge.x, Math.min(this.edge.x, x)),
+      z: Math.max(-this.edge.z, Math.min(this.edge.z, z)),
+    };
   }
 
   climateAt() {
@@ -1319,14 +1590,33 @@ export class City {
     for (const npc of this.npcs) {
       npc.label.position.set(npc.group.position.x, 2.18, npc.group.position.z);
     }
+    for (const marker of this.doorMarkers) {
+      const wave = 0.5 + Math.sin(this.time * 2.2 + marker.phase) * 0.5;
+      marker.sprite.material.opacity = 0.55 + wave * 0.4;
+      marker.sprite.position.y = 1.42 + Math.sin(this.time * 1.7 + marker.phase) * 0.05;
+    }
+    this.traffic?.update(dt, elapsed);
   }
 
   disposes() {
+    for (const room of this.interiors.values()) {
+      room.group?.traverse?.((object) => {
+        if (!object.isMesh) return;
+        if (!object.geometry?.userData?.cached) object.geometry?.dispose?.();
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        materials.forEach((m) => { if (m && !m.userData?.shared) m.dispose?.(); });
+      });
+    }
+    this.interiors.clear();
     this.group.traverse((object) => {
       if (!object.isMesh) return;
-      object.geometry?.dispose?.();
-      if (Array.isArray(object.material)) object.material.forEach((m) => m?.dispose?.());
-      else object.material?.dispose?.();
+      // Merged meshes are owned by this district; kit materials are shared
+      // across districts and must survive until the page is closed.
+      if (!object.geometry?.userData?.cached) object.geometry?.dispose?.();
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach((m) => {
+        if (m && !m.userData?.shared) m.dispose?.();
+      });
     });
   }
 }

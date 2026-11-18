@@ -9,8 +9,9 @@ free tier with no build step and no credit card.
 - 750 instance-hours / month (≈ 24/7 fits).
 - Sleeps after 15 minutes with no traffic; waking takes ~1 minute.
 - 5 GB outbound bandwidth / month (shared across the workspace).
-- Ephemeral disk: the SQLite fleet database resets on redeploy/restart.
-  Acceptable for a free game; set `AETHERHOLD_DB` only if you add a disk.
+- Ephemeral disk: the SQLite database (accounts, drivers, fleets) resets on
+  redeploy/restart. Acceptable for a free game; add a disk and set
+  `AETHERHOLD_DB` if drivers must keep their accounts.
 
 ## Step 1 — Push to GitHub
 
@@ -29,7 +30,7 @@ git push origin main
 3. Render auto-detects Python. Confirm:
    - **Runtime:** Python 3
    - **Build command:** `echo "no dependencies"`
-   - **Start command:** `python server.py --no-wizard --no-browser`
+   - **Start command:** `python server.py --no-wizard --no-browser --max-players 16 --slots 32`
    - **Plan:** Free
    - **Health check path:** `/api/health`
 4. (Optional) Under **Environment**, add:
@@ -45,6 +46,9 @@ applies the same settings without filling the form by hand.
 
 Open the assigned `onrender.com` URL. Everyone can join directly from the
 browser — no `--connect` needed, because the game is served from the same host.
+Each driver creates an account on first entry; the account (and its cash, gear,
+contracts and boss bands) is stored in the host's SQLite file, not in the
+browser.
 
 The admin panel is at `https://your-app.onrender.com/admin?key=…` (key printed
 in the Render logs; or use the env var you set).
@@ -66,7 +70,15 @@ included `Dockerfile`:
   on Render, Northflank, Railway, Fly and Docker without flags. The defaults
   (8080, `./aetherhold.db`) are unchanged for local hosting.
 - On a host with no TTY (all of the above) the setup wizard is skipped
-  automatically and defaults are used (region `turkey`, 12 slots).
+  automatically and defaults are used (region `turkey`, 32 slots).
+- The pre-made room opens with **16 slots** (`--max-players 16`). The hard
+  ceiling is 32 (`MAX_PLAYERS_LIMIT`), so a bigger box can raise it:
+  `--max-players 24`. Every player syncs 9 times a second, so the free 0.1 CPU
+  instance is comfortable around 8–10 people; a paid instance carries 16+
+  without trouble.
+- Anyone who reached the game over the network can download the exact
+  `server.py` from **Host Server → No server.py on this machine? Download it**
+  (it is also at `/download/server.py`).
 - The console panel is disabled automatically when stdin is not a TTY.
 - Behind a proxy the server trusts `X-Forwarded-For` for the real client IP, so
   a ban hits the player rather than everyone sharing the load balancer. The
@@ -85,6 +97,7 @@ included `Dockerfile`:
   `public/index.html`.
 - **First visit takes ~30 s** — a sleeping free instance is waking. Reload once.
 - **Everything resets after a deploy** — the free disk is ephemeral; that is the
-  SQLite fleet database being recreated. Add a disk for persistence.
+  SQLite database being recreated, which also drops every account. Add a disk
+  and point `AETHERHOLD_DB` at it for persistence.
 - **`/admin` asks for a password you lost** — set `AETHERHOLD_ADMIN_PASSWORD` in
   the Render dashboard and redeploy, or read it from the boot logs.

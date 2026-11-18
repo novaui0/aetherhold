@@ -891,7 +891,10 @@ export function avatarLabelTexture(name, color, subtitle = "") {
   }
   ctx.shadowBlur = 0;
   const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
   texture.anisotropy = 4;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   texture.needsUpdate = true;
   return texture;
 }
