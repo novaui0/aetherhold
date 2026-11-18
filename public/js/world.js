@@ -169,7 +169,8 @@ export class World {
     this._buildWorld();
     this.region = new City(this.scene, { world, language });
     this.truck = this.region.truck;
-    this.position.set(-12, 0, 6);
+    const spawnPt = this.region.spawnPoint || { x: -5, z: 9.6 };
+    this.position.set(spawnPt.x, 0, spawnPt.z);
     this.facing = Math.PI / 2;
     this.yaw = -Math.PI / 2;
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, {
@@ -809,6 +810,7 @@ export class World {
         this._lastBlockNotice = now;
         const message = blocked === "furniture" ? "Furniture in the way"
           : blocked === "wall" ? "That is a wall"
+          : blocked === "vehicle" ? "Vehicle in the way"
           : "Something solid ahead";
         if (this.onNotice) this.onNotice(message, "bad");
       }
@@ -1304,6 +1306,27 @@ export class World {
         this.position.z = Math.max(-edge.z, Math.min(edge.z, this.position.z));
       }
       this._resolveCollision(previousX, previousZ, false);
+
+      // Physics: push the on-foot driver out of any vehicle that overlaps
+      // them (traffic cars, parked cars, the player's own truck when not
+      // driven). A car that runs into the player shoves them aside instead
+      // of passing through.
+      if (this.region?.dynamicColliders) {
+        for (const d of this.region.dynamicColliders) {
+          const dx = this.position.x - d.x;
+          const dz = this.position.z - d.z;
+          const overlapX = d.hx - Math.abs(dx);
+          const overlapZ = d.hz - Math.abs(dz);
+          if (overlapX > 0 && overlapZ > 0) {
+            if (overlapX < overlapZ) {
+              this.position.x += (dx >= 0 ? 1 : -1) * (overlapX + 0.08);
+            } else {
+              this.position.z += (dz >= 0 ? 1 : -1) * (overlapZ + 0.08);
+            }
+            this.velocity.set(0, 0, 0);
+          }
+        }
+      }
 
       if (this.zone === "raid" && this.raid) {
         const center = this.raid.center;

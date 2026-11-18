@@ -76,6 +76,8 @@ export class City {
     this.solids = [];
     this.boxes = [];
     this.cars = [];
+    this.dynamicColliders = [];
+    this.spawnPoint = { x: -8, z: 7.6, heading: Math.PI / 2 };
     this.roads = [];
     this.blips = [];
     this.blinkers = [];
@@ -1460,14 +1462,93 @@ export class City {
   }
 
   _spawnVehicle() {
+    const spawnX = -8;
+    const spawnZ = 7.6;
     const car = createCar({ type: "sports", color: "#c8a93f" });
-    car.position.set(-8, 0, 7.6);
+    car.position.set(spawnX, 0, spawnZ);
     car.rotation.y = Math.PI / 2;
     this.dynamic.add(car);
     this.truck = car;
     this.cars.push(car);
     contactShadow(car, 2.0, 0.45, 0.02);
-    this.vehicleSpawn = { x: -8, z: 7.6, heading: Math.PI / 2 };
+    this.vehicleSpawn = { x: spawnX, z: spawnZ, heading: Math.PI / 2 };
+    this.spawnPoint = { x: spawnX + 3, z: spawnZ + 2, heading: Math.PI };
+    this._buildSpawnPad(spawnX, spawnZ);
+  }
+
+  _buildSpawnPad(cx, cz) {
+    const M = this.materials;
+    const pad = new THREE.Group();
+    pad.name = "spawn-pad";
+    // Concrete apron.
+    const apron = new THREE.Mesh(
+      new THREE.BoxGeometry(16, 0.12, 12),
+      M.concrete || M.plaster
+    );
+    apron.position.set(cx, 0.06, cz);
+    apron.receiveShadow = true;
+    pad.add(apron);
+    // Painted lane markings.
+    const stripeMat = new THREE.MeshStandardMaterial({ color: "#f4f0e6", roughness: 0.6, metalness: 0.05 });
+    for (let i = -2; i <= 2; i += 1) {
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.02, 10), stripeMat);
+      stripe.position.set(cx + i * 3.2, 0.13, cz);
+      pad.add(stripe);
+    }
+    // Centre line (yellow).
+    const centre = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.02, 10), new THREE.MeshStandardMaterial({ color: "#d9b23a", roughness: 0.5 }));
+    centre.position.set(cx, 0.13, cz);
+    pad.add(centre);
+    // Bollards around the pad.
+    const bollardMat = new THREE.MeshStandardMaterial({ color: "#c9a227", roughness: 0.4, metalness: 0.3 });
+    const corners = [
+      [cx - 7.6, cz - 5.6], [cx + 7.6, cz - 5.6],
+      [cx - 7.6, cz + 5.6], [cx + 7.6, cz + 5.6],
+    ];
+    for (const [bx, bz] of corners) {
+      const bollard = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 0.9, 12), bollardMat);
+      bollard.position.set(bx, 0.45, bz);
+      bollard.castShadow = true;
+      pad.add(bollard);
+      // Reflective cap.
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 8), new THREE.MeshStandardMaterial({ color: "#ffffff", emissive: "#ffeeaa", emissiveIntensity: 0.6 }));
+      cap.position.set(bx, 0.92, bz);
+      pad.add(cap);
+    }
+    // Spawn marker (glowing ring on the ground).
+    const ringGeom = new THREE.RingGeometry(1.1, 1.35, 32);
+    const ringMat = new THREE.MeshBasicMaterial({ color: "#7df9ff", transparent: true, opacity: 0.75, side: THREE.DoubleSide });
+    const ring = new THREE.Mesh(ringGeom, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(this.spawnPoint.x, 0.14, this.spawnPoint.z);
+    pad.add(ring);
+    // Vertical beacon.
+    const beacon = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.06, 0.06, 2.6, 8),
+      new THREE.MeshStandardMaterial({ color: "#7df9ff", emissive: "#7df9ff", emissiveIntensity: 0.9 })
+    );
+    beacon.position.set(this.spawnPoint.x, 1.3, this.spawnPoint.z);
+    pad.add(beacon);
+    // "SPAWN" text label (sprite).
+    const canvas = document.createElement("canvas");
+    canvas.width = 256; canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, 256, 64);
+    ctx.fillStyle = "#7df9ff";
+    ctx.font = "bold 34px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("SPAWN", 128, 32);
+    const tex = new THREE.CanvasTexture(canvas);
+    const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.position.set(this.spawnPoint.x, 2.6, this.spawnPoint.z);
+    sprite.scale.set(4, 1, 1);
+    pad.add(sprite);
+    // Block the spawn pad area so people don't walk through the beacon.
+    this.boxes.push({ x: this.spawnPoint.x, z: this.spawnPoint.z, hx: 0.9, hz: 0.9 });
+    this.statics.add(pad);
   }
 
   // ── interaction ───────────────────────────────────────────────────────
@@ -1566,6 +1647,12 @@ export class City {
       if (box.noBlock) continue;
       if (Math.abs(x - box.x) < box.hx && Math.abs(z - box.z) < box.hz) return "building";
     }
+    // Dynamic colliders: traffic vehicles, parked cars and the player's own
+    // truck (when not being driven) are solid bodies the player and the
+    // driven vehicle must not pass through.
+    for (const d of this.dynamicColliders) {
+      if (Math.abs(x - d.x) < d.hx && Math.abs(z - d.z) < d.hz) return "vehicle";
+    }
     if (Math.abs(x) > CITY_EDGE.x - 1 || Math.abs(z) > CITY_EDGE.z - 1) return "building";
     return "";
   }
@@ -1596,6 +1683,22 @@ export class City {
       marker.sprite.position.y = 1.42 + Math.sin(this.time * 1.7 + marker.phase) * 0.05;
     }
     this.traffic?.update(dt, elapsed);
+    // Rebuild the dynamic collider set from the moving traffic and parked
+    // vehicles so collision queries reflect the current frame.
+    this.dynamicColliders = [];
+    if (this.traffic?.vehicles) {
+      for (const v of this.traffic.vehicles) {
+        const obj = v.object;
+        if (obj) {
+          this.dynamicColliders.push({ x: obj.position.x, z: obj.position.z, hx: 1.35, hz: 2.5 });
+        }
+      }
+    }
+    for (const car of this.cars) {
+      const isPlayerTruck = car === this.truck;
+      if (isPlayerTruck && this.world?.inVehicle) continue;
+      this.dynamicColliders.push({ x: car.position.x, z: car.position.z, hx: 1.35, hz: 2.5 });
+    }
   }
 
   disposes() {

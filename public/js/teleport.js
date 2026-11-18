@@ -21,7 +21,7 @@ const PLACES = {
   inn: ["inn", "tavern", "han", "rest", "otel"],
 };
 
-const SPAWN = { x: -12, z: 6, heading: Math.PI / 2 };
+const SPAWN = { x: -5, z: 9.6, heading: Math.PI };
 
 function fold(value) {
   return String(value || "")
@@ -89,7 +89,8 @@ export function teleportCommand(world, raw) {
   }
 
   if (SPAWN_WORDS.has(first)) {
-    return go(world, SPAWN.x, SPAWN.z, SPAWN.heading, t("tp.spawn"));
+    const sp = world.region?.spawnPoint || SPAWN;
+    return go(world, sp.x, sp.z, sp.heading ?? SPAWN.heading, t("tp.spawn"));
   }
 
   // /tp 42 -18 — map coordinates, clamped to the district by the world.
