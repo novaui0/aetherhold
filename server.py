@@ -1486,6 +1486,8 @@ ITEMS = {
 }
 
 SHOP_STOCK = ["pistol", "shotgun", "carbine", "ammo", "medkit", "burger", "water"]
+# Loose loot the city scatters on pavements; matches City._buildPickups().
+GATHER_KEYS = {"scrap", "leather", "ammo", "medkit", "burger", "water"}
 
 BOSS_BANDS = [
     {"name": "The Rat King", "place": "Band I — The Drowned Docks", "hp": 320,
@@ -2976,6 +2978,21 @@ class Handler(BaseHTTPRequestHandler):
             profile["cash"] = round(float(profile.get("cash", 0)) + worth, 2)
             save_profile(profile)
             return done(shop=shop_stock(profile), sold={"key": key, "qty": qty, "price": worth})
+
+        if action == "gather":
+            # Street crates: the city places them, the sheet records the find.
+            # The cooldown keeps a held key from vacuuming a whole block.
+            key = str(body.get("key") or "")
+            if key not in GATHER_KEYS:
+                raise ApiError(404, "Nothing like that on the street")
+            now = time.time()
+            last = float(profile.get("stats", {}).get("lastGather", 0) or 0)
+            if now - last < 1.2:
+                raise ApiError(429, "Easy — one crate at a time")
+            profile.setdefault("stats", {})["lastGather"] = now
+            grant_item(profile, key, 1)
+            save_profile(profile)
+            return done(picked={"key": key, "qty": item_count(profile, key)})
 
         if action == "equip":
             key = str(body.get("key") or "")

@@ -17,22 +17,26 @@ import { createNpcRecord } from "./region.js";
 import { buildInterior } from "./interior.js";
 import { buildThemedInterior } from "./interiors.js";
 import { Traffic } from "./traffic.js";
+import { CITY_GRID, districtNameAt, planCity } from "./worldgen.js";
 
 const TAU = Math.PI * 2;
 
 export const AVE_HALF = 12;
 export const CROSS_STREETS = [-140, -78, -26, 26, 78, 140];
 export const CROSS_HALF = 10;
-// Twice the old footprint: a residential west row, a harbour east row and a
-// market back street south of the boulevard.
-export const CITY_EDGE = { x: 180, z: 110 };
+// The playable district: the hand-built core in the middle, four generated
+// districts around it and the ring road on the edge (~860 × 760 world units).
+export const CITY_EDGE = CITY_GRID.edge;
 
 const STREETS = {
   avenue: "VINEWOOD BLVD",
   cross: ["WESTGATE", "ALTA ST", "POWER ST", "MISSION ROW", "ELGIN AVE", "HARBOR WAY"],
 };
 
-const BLOCKS = [
+// The old core is still modelled by hand: the boulevard, the garage, the market
+// row and the tower plaza are what the player sees first, so they keep their
+// bespoke detail. Everything outside it comes from the plan in worldgen.js.
+const CORE_BLOCKS = [
   { x0: -118, x1: -88, z0: 12, z1: 68, kind: "park" },
   { x0: -68, x1: -36, z0: 12, z1: 68, kind: "brick" },
   { x0: -16, x1: 16, z0: 12, z1: 68, kind: "tower" },
@@ -56,6 +60,10 @@ const BLOCKS = [
   { x0: -68, x1: -36, z0: 80, z1: 104, kind: "park" },
   { x0: 36, x1: 68, z0: 80, z1: 104, kind: "park" },
 ];
+
+const PLAN = planCity();
+const OUTER_BLOCKS = PLAN.blocks;
+const BLOCKS = [...CORE_BLOCKS, ...OUTER_BLOCKS];
 
 export class City {
   constructor(scene, { world = null, language = "en" } = {}) {
@@ -81,10 +89,18 @@ export class City {
     this.roads = [];
     this.blips = [];
     this.blinkers = [];
+    this.stations = [];
+    this.pickups = [];
     this.time = 0;
     this.inside = false;
     this.interior = null;
     this.blocks = BLOCKS;
+    this.coreBlocks = CORE_BLOCKS;
+    this.outerBlocks = OUTER_BLOCKS;
+    this.outerRoads = PLAN.roads;
+    this.districts = PLAN.districts;
+    this._facades = new Map();
+    this._signMaterials = new Map();
     this.doors = [];
     this.interiors = new Map();
     this.doorMarkers = [];
@@ -98,6 +114,7 @@ export class City {
     this._buildGround();
     this._buildRoads();
     this._buildBlocks();
+    this._buildPickups();
     this._buildSkyline();
     this._buildStreetFurniture();
     this._buildTraffic();
@@ -169,7 +186,7 @@ export class City {
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.mapping = THREE.EquirectangularReflectionMapping;
     const dome = new THREE.Mesh(
-      new THREE.SphereGeometry(720, 48, 32),
+      new THREE.SphereGeometry(3200, 48, 32),
       new THREE.MeshBasicMaterial({
         map: texture, side: THREE.BackSide, fog: false, depthWrite: false,
       })
@@ -183,8 +200,8 @@ export class City {
   // ── ground and road network ───────────────────────────────────────────
   _buildGround() {
     const M = this.materials;
-    // Everything outside the grid is scrub and dust.
-    const outer = new THREE.Mesh(new THREE.PlaneGeometry(1400, 1400), M.grass);
+    // Everything outside the grid is scrub and dust, all the way to the hills.
+    const outer = new THREE.Mesh(new THREE.PlaneGeometry(CITY_EDGE.x * 4.2, CITY_EDGE.z * 4.6), M.grass);
     outer.rotation.x = -Math.PI / 2;
     outer.position.y = -0.16;
     outer.receiveShadow = true;
@@ -194,16 +211,17 @@ export class City {
     addMesh(this.statics, roundedBox(CITY_EDGE.x * 2, 0.32, CITY_EDGE.z * 2, 2.4, { bevel: 0.06 }),
       M.asphalt, [0, -0.16, 0]);
 
-    // Distant hills so the horizon is not a hard line.
-    for (let i = 0; i < 10; i += 1) {
-      const angle = (i / 10) * TAU + 0.3;
-      const radius = 330 + Math.random() * 90;
+    // Distant hills so the horizon is not a hard line. They now sit outside
+    // the expanded grid, far enough that fog eats most of them.
+    for (let i = 0; i < 22; i += 1) {
+      const angle = (i / 22) * TAU + 0.3;
+      const radius = CITY_EDGE.x * 1.25 + Math.random() * 900;
       const ridge = new THREE.Mesh(
-        new THREE.IcosahedronGeometry(60 + Math.random() * 70, 1),
+        new THREE.IcosahedronGeometry(150 + Math.random() * 190, 1),
         new THREE.MeshStandardMaterial({ color: 0x2b2f38, roughness: 1 })
       );
-      ridge.position.set(Math.cos(angle) * radius, -12 - Math.random() * 6, Math.sin(angle) * radius);
-      ridge.scale.set(1.6, 0.42, 1.2);
+      ridge.position.set(Math.cos(angle) * radius, -22 - Math.random() * 10, Math.sin(angle) * radius);
+      ridge.scale.set(1.8, 0.4, 1.3);
       this.statics.add(ridge);
     }
   }
@@ -229,16 +247,18 @@ export class City {
 
     // Double yellow centre line, broken for every junction.
     const isJunction = (x) => CROSS_STREETS.some((c) => Math.abs(x - c) < CROSS_HALF + 3);
-    for (let x = -CITY_EDGE.x + 4; x < CITY_EDGE.x - 4; x += 4) {
+    // The boulevard runs the whole map now, so the paint is laid in longer
+    // dashes: same read at speed, a fraction of the geometry.
+    for (let x = -CITY_EDGE.x + 4; x < CITY_EDGE.x - 4; x += 9) {
       if (isJunction(x)) continue;
-      paint(3.4, 0.16, x + 1.7, -0.35, M.paintYellow);
-      paint(3.4, 0.16, x + 1.7, 0.35, M.paintYellow);
+      paint(7.4, 0.16, x + 3.7, -0.35, M.paintYellow);
+      paint(7.4, 0.16, x + 3.7, 0.35, M.paintYellow);
     }
     // Lane dividers.
     [-6, 6].forEach((z) => {
-      for (let x = -CITY_EDGE.x + 4; x < CITY_EDGE.x - 4; x += 9) {
+      for (let x = -CITY_EDGE.x + 4; x < CITY_EDGE.x - 4; x += 18) {
         if (isJunction(x + 2)) continue;
-        paint(4.2, 0.12, x + 2, z, M.paintWhite);
+        paint(8.2, 0.12, x + 4, z, M.paintWhite);
       }
     });
     // Kerb-side parking boxes and stop bars at every junction.
@@ -265,6 +285,27 @@ export class City {
         }
       });
     });
+
+    // ── outer street network ──
+    // The generated districts bring their own grid. The ground plate is one
+    // asphalt slab, so the streets only need lane paint and a radar entry.
+    for (const road of this.outerRoads) {
+      if (this.roads.some((entry) => entry.name === road.name
+        && entry.x1 === road.x1 && entry.z1 === road.z1)) continue;
+
+      this.roads.push(road);
+      // Only the arteries get lane paint: a dash on every side street would
+      // add thousands of plates for a detail nobody reads at 90 km/h.
+      if (!road.paint) continue;
+      const horizontal = Math.abs(road.z2 - road.z1) < 0.01;
+      const length = horizontal ? Math.abs(road.x2 - road.x1) : Math.abs(road.z2 - road.z1);
+      const start = horizontal ? Math.min(road.x1, road.x2) : Math.min(road.z1, road.z2);
+      const fixed = horizontal ? road.z1 : road.x1;
+      for (let d = 12; d < length - 12; d += 30) {
+        if (horizontal) paint(9.6, 0.14, start + d, fixed, M.paintWhite);
+        else paint(0.14, 9.6, fixed, start + d, M.paintWhite);
+      }
+    }
 
     // Manhole covers, drains and puddles: the small proofs that it rains here.
     for (let i = 0; i < 22; i += 1) {
@@ -296,7 +337,7 @@ export class City {
   // ── blocks ────────────────────────────────────────────────────────────
   _buildBlocks() {
     const M = this.materials;
-    for (const block of BLOCKS) {
+    for (const block of this.coreBlocks) {
       const width = block.x1 - block.x0;
       const depth = block.z1 - block.z0;
       const cx = (block.x0 + block.x1) / 2;
@@ -328,6 +369,487 @@ export class City {
       }[block.kind];
       builder?.();
     }
+
+    // The rest of the city comes from the plan: the same kit solids, cheap
+    // recipes, enough variety that no two streets read alike.
+    for (const block of this.outerBlocks) this._sprawlBlock(block);
+  }
+
+  // ── the generated sprawl ──────────────────────────────────────────────
+  //
+  // Outside the core the city is drawn from the plan in worldgen.js. A sprawl
+  // block is a pavement plate, one to three masses and the props its zone
+  // implies: volume and silhouette, not another bespoke storefront. Every
+  // service block still gets a sign, a blip, an NPC and a working counter.
+  _sprawlBlock(block) {
+    const M = this.materials;
+    const width = block.x1 - block.x0;
+    const depth = block.z1 - block.z0;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    const rng = this._blockRng(block);
+
+    // Raised pavement, exactly like the core: the kerb is what makes a block
+    // read as a block from a moving car.
+    addMesh(this.statics, roundedBox(width, 0.24, depth, 0.5, { bevel: 0.07 }),
+      M.sidewalk, [cx, 0.12, cz]);
+
+    const style = this._sprawlStyle(block);
+    switch (block.kind) {
+      case "park": this._sprawlPark(block, rng); break;
+      case "lot": this._sprawlLot(block, rng); break;
+      case "house": this._sprawlHouses(block, rng, style); break;
+      case "tower": this._sprawlTower(block, rng); break;
+      case "warehouse": this._sprawlWarehouse(block, rng); break;
+      case "fuel": this._sprawlFuel(block, style); break;
+      case "garage": this._sprawlGarage(block, style); break;
+      case "clinic": this._sprawlClinic(block, style); break;
+      case "market": this._sprawlMarket(block, rng); break;
+      case "police": this._sprawlPolice(block, style); break;
+      case "diner": this._sprawlDiner(block, style); break;
+      case "plaza": this._sprawlPlaza(block, rng); break;
+      case "hotel": this._sprawlHotel(block, style); break;
+      case "subway": this._sprawlSubway(block); break;
+      case "stadium": this._stadiumBlock(block); break;
+      default: this._sprawlMidRise(block, rng, style);
+    }
+  }
+
+  // Deterministic per block: the same seed rebuilds the same street.
+  _blockRng(block) {
+    let state = (Math.abs(Math.round(block.x0 * 7 + block.z0 * 13)) % 2147483647) || 1;
+    return () => {
+      state = (state * 16807) % 2147483647;
+      return (state - 1) / 2147483646;
+    };
+  }
+
+  _sprawlStyle(block) {
+    const depth = block.depth || 0;
+    switch (block.zone) {
+      case "east": return depth < 4 ? "glass" : depth < 9 ? "stone" : "industrial";
+      case "southPort": return "industrial";
+      case "west": return depth < 3 ? "stone" : "brick";
+      case "southWest": return "old";
+      case "north": return depth < 4 ? "stone" : "plaster";
+      default: return "industrial";
+    }
+  }
+
+  // One facade texture per style, shared by thousands of windows. The UVs are
+  // in world units, so the repeat is what sets the real window pitch.
+  _sprawlFacade(style) {
+    const cached = this._facades.get(style);
+    if (cached) return cached;
+    const tints = {
+      glass: ["#3d4a5d", 0.44], stone: ["#5b5f68", 0.3], brick: ["#6a4a3e", 0.32],
+      plaster: ["#6b645d", 0.26], industrial: ["#474d55", 0.18], old: ["#57493f", 0.24],
+    };
+    const [tint, lit] = tints[style] || tints.stone;
+    const texture = facadeTexture({ tint, lit });
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(0.06, 0.032);
+    const material = new THREE.MeshStandardMaterial({
+      map: texture, emissiveMap: texture, emissive: 0xffffff, emissiveIntensity: 0.26,
+      roughness: 0.8, metalness: 0.14,
+    });
+    material.userData.shared = true;
+    this._facades.set(style, material);
+    return material;
+  }
+
+  // A quantised mass: identical solids share one cached geometry, and the merge
+  // pass at the end of the build folds them into a handful of draws.
+  _sprawlMass(x, z, w, d, h, style, options = {}) {
+    const q = (value, step, min) => Math.max(min, Math.round(value / step) * step);
+    const qw = q(w, 2, 6);
+    const qd = q(d, 2, 6);
+    const qh = q(h, 3, 5);
+    const base = options.base ?? 0.24;
+    addMesh(this.statics, roundedBox(qw, qh, qd, Math.min(1.3, qd * 0.14), { bevel: 0.25 }),
+      this._sprawlFacade(style), [x, base + qh / 2, z]);
+    if (options.roof !== false) {
+      addMesh(this.statics, roundedBox(qw * 0.92, 0.9, qd * 0.92, 0.3), this.materials.roof,
+        [x, base + qh + 0.45, z]);
+    }
+    if (options.collider !== false) {
+      this.boxes.push({ x, z, hx: qw / 2 + 0.3, hz: qd / 2 + 0.3 });
+    }
+    return { qw, qh, qd, top: base + qh };
+  }
+
+  // A lit shop sign hanging off a facade, or standing on a pylon.
+  _sprawlSign(x, y, z, text, color, { rotation = 0, width = 9 } = {}) {
+    const key = `${text}|${color}`;
+    let material = this._signMaterials.get(key);
+    if (!material) {
+      const texture = signTexture([text], { color });
+      material = new THREE.MeshBasicMaterial({
+        map: texture, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      });
+      material.userData.shared = true;
+      this._signMaterials.set(key, material);
+    }
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, width * 0.5), material);
+    mesh.position.set(x, y, z);
+    mesh.rotation.y = rotation;
+    this.statics.add(mesh);
+    return mesh;
+  }
+
+  _sprawlSite(block, x, z) {
+    return this._siteMarker(block.kind, x, z, {
+      id: `${block.kind}-${block.x0}-${block.z0}`,
+      label: block.siteLabel,
+      color: block.siteColor,
+      npc: block.npc,
+      services: block.services,
+    });
+  }
+
+  _sprawlPark(block, rng) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    addMesh(this.statics, roundedBox(block.x1 - block.x0 - 1.4, 0.3, block.z1 - block.z0 - 1.4, 1.2),
+      M.grass, [cx, 0.3, cz]);
+    addMesh(this.statics, roundedBox(block.x1 - block.x0 - 1.4, 0.34, 3.6, 0.4), M.roof, [cx, 0.34, cz]);
+    const trees = 4 + Math.round(rng() * 4);
+    for (let i = 0; i < trees; i += 1) {
+      const x = block.x0 + 4 + rng() * (block.x1 - block.x0 - 8);
+      const z = block.z0 + 5 + rng() * (block.z1 - block.z0 - 10);
+      if (Math.abs(z - cz) < 2.4) continue;
+      this._tree(x, z, 0.8 + rng() * 0.5);
+    }
+    this._bench(cx - 5, cz + 3.4, Math.PI);
+    this._bench(cx + 5, cz - 3.4, 0);
+  }
+
+  _sprawlLot(block, rng) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    addMesh(this.statics, roundedBox(block.x1 - block.x0 - 1.6, 0.26, block.z1 - block.z0 - 1.6, 0.4),
+      M.asphalt, [cx, 0.26, cz]);
+    const containers = 2 + Math.round(rng() * 3);
+    const colors = ["#7d1f22", "#2c4d63", "#4d5a45", "#c9a227"];
+    for (let i = 0; i < containers; i += 1) {
+      const w = 6.2;
+      const d = 2.6;
+      const x = block.x0 + 8 + (i % 2) * 13;
+      const z = block.z0 + 14 + Math.floor(i / 2) * 18;
+      const stacked = rng() < 0.4 ? 2 : 1;
+      for (let level = 0; level < stacked; level += 1) {
+        addMesh(this.statics, roundedBox(w, 2.55, d, 0.12), M.carPaint(colors[i % colors.length]),
+          [x, 0.3 + 1.3 + level * 2.6, z]);
+      }
+      this.boxes.push({ x, z, hx: 3.4, hz: 1.6 });
+    }
+    // A yard fence: posts and a rail, so the lot has an edge.
+    for (let i = 0; i <= 6; i += 1) {
+      addMesh(this.statics, roundedBox(0.16, 2.1, 0.16, 0.04), M.steel,
+        [block.x0 + 2 + (i / 6) * (block.x1 - block.x0 - 4), 1.3, block.z1 - 3]);
+    }
+  }
+
+  _sprawlHouses(block, rng, style) {
+    const M = this.materials;
+    const columns = 3;
+    const rows = 2;
+    const cellW = (block.x1 - block.x0) / columns;
+    const cellD = (block.z1 - block.z0) / rows;
+    for (let row = 0; row < rows; row += 1) {
+      for (let col = 0; col < columns; col += 1) {
+        const x = block.x0 + cellW * (col + 0.5);
+        const z = block.z0 + cellD * (row + 0.5) - 4;
+        const h = 5.4 + Math.round(rng() * 3) * 1.5;
+        const mass = this._sprawlMass(x, z, 8.6, 10.4, h, style, { roof: false });
+        addMesh(this.statics, roundedBox(mass.qw + 0.6, 0.7, mass.qd + 0.6, 0.2), M.roof,
+          [x, mass.top + 0.3, z]);
+        // A hedge and a path, the two things that read as garden from above.
+        addMesh(this.statics, roundedBox(mass.qw, 0.7, 1.1, 0.3), M.foliageDark,
+          [x, 0.6, z + cellD / 2 - 2.2]);
+        addMesh(this.statics, roundedBox(1.6, 0.3, 3.4, 0.2), M.stone,
+          [x, 0.3, block.z0 + cellD * (row + 1) - 1.6]);
+      }
+    }
+  }
+
+  _sprawlMidRise(block, rng, style) {
+    const M = this.materials;
+    const front = block.z0 < 0 ? block.z1 : block.z0;
+    const dir = block.z0 < 0 ? -1 : 1;
+    const hA = 11 + Math.round(rng() * 5) * 3;
+    const hB = 9 + Math.round(rng() * 4) * 3;
+    const a = this._sprawlMass(block.x0 + 12, front + dir * 14, 17, 22, hA, style);
+    this._sprawlMass(block.x1 - 11, front + dir * 15, 12, 19, hB, style);
+    // Storefront band along the street face.
+    const glass = new THREE.Mesh(roundedBox(a.qw - 1.2, 3.1, 0.4, 0.1), M.storeGlass);
+    glass.position.set(block.x0 + 12, 1.9, front + dir * 3.2 - dir * 0.2);
+    this.statics.add(glass);
+    const awning = new THREE.Mesh(roundedBox(a.qw - 2, 0.24, 1.9, 0.12), M.carPaint(rng() < 0.5 ? "#7d1f22" : "#2c4d63"));
+    awning.position.set(block.x0 + 12, 3.6, front + dir * 2.4);
+    this.statics.add(awning);
+    if (block.depth <= 3) {
+      this._sprawlSign(block.x0 + 12, 5.4, front + dir * 2.2, block.district, "#ffe9b8",
+        { rotation: dir > 0 ? Math.PI : 0, width: 8 });
+    }
+  }
+
+  _sprawlTower(block, rng) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    // Podium, tower, spire: three solids and the skyline gets its spike.
+    this._sprawlMass(cx, cz, 30, 40, 8, "stone");
+    const height = 34 + Math.round(rng() * 12) * 6;
+    const tower = this._sprawlMass(cx, cz, 17, 22, height, "glass", { base: 8.24 });
+    addMesh(this.statics, roundedBox(0.5, 12, 0.5, 0.1), M.steel,
+      [cx, tower.top + 6, cz]);
+    const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.42, 10, 8), M.neonPink);
+    beacon.position.set(cx, tower.top + 12.4, cz);
+    this.statics.add(beacon);
+    this.blinkers.push({ mesh: beacon, phase: rng() * TAU });
+    if (block.depth <= 2) {
+      this._sprawlSign(cx, 6.4, cz + 20.4, rng() < 0.5 ? "AURELIA" : "MERIDIAN", "#8ee6ff", { width: 12 });
+    }
+  }
+
+  _sprawlWarehouse(block, rng) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    const shed = this._sprawlMass(cx, cz + 4, 34, 42, 9 + Math.round(rng() * 2) * 3, "industrial", { roof: false });
+    // A shallow gable: two tilted slabs over the shed.
+    addMesh(this.statics, roundedBox(shed.qw + 0.8, 0.5, shed.qd * 0.56, 0.1), M.roof,
+      [cx, shed.top + 1.2, cz + 4 - shed.qd * 0.26], [0.24, 0, 0]);
+    addMesh(this.statics, roundedBox(shed.qw + 0.8, 0.5, shed.qd * 0.56, 0.1), M.roof,
+      [cx, shed.top + 1.2, cz + 4 + shed.qd * 0.26], [-0.24, 0, 0]);
+    // Loading doors.
+    for (let i = 0; i < 3; i += 1) {
+      addMesh(this.statics, roundedBox(4.6, 4.2, 0.24, 0.08), M.darkTrim,
+        [cx - 10 + i * 10, 2.4, cz + 4 + shed.qd / 2 + 0.1]);
+    }
+  }
+
+  _sprawlFuel(block, style) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    // Forecourt, canopy on four columns, two islands of pumps.
+    addMesh(this.statics, roundedBox(block.x1 - block.x0 - 2, 0.3, 18, 0.4), M.asphalt, [cx, 0.3, cz + 4]);
+    [-7, 7].forEach((z) => {
+      [-1, 1].forEach((side) => {
+        addMesh(this.statics, roundedBox(0.4, 4.4, 0.4, 0.08), M.steel,
+          [cx + side * 8, 2.6, cz + z]);
+      });
+      addMesh(this.statics, roundedBox(2.4, 0.9, 1.4, 0.16), M.plaster, [cx, 0.85, cz + z]);
+      addMesh(this.statics, roundedBox(1.6, 0.6, 0.3, 0.08), M.lampCool, [cx, 1.5, cz + z]);
+      this.boxes.push({ x: cx, z: cz + z, hx: 1.4, hz: 0.9 });
+    });
+    addMesh(this.statics, roundedBox(20, 0.7, 18, 0.3), M.paintWhite, [cx, 5.2, cz + 4]);
+    addMesh(this.statics, roundedBox(19.4, 0.2, 17.4, 0.2), M.lampCool, [cx, 5.6, cz + 4]);
+    // Kiosk at the back.
+    this._sprawlMass(cx, cz - 20, 12, 8, 3.6, style);
+    this._sprawlSign(cx, 7.2, cz + 14, block.siteLabel, block.siteColor, { width: 14 });
+    addMesh(this.statics, roundedBox(0.5, 6.4, 0.5, 0.1), M.steel, [cx, 3.4, cz + 14]);
+    this._sprawlSite(block, cx, cz + 4);
+  }
+
+  _sprawlGarage(block, style) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    const shop = this._sprawlMass(cx, cz - 4, 24, 30, 8, style, { roof: false });
+    addMesh(this.statics, roundedBox(shop.qw + 0.6, 0.6, shop.qd + 0.6, 0.2), M.roof,
+      [cx, shop.top + 0.3, cz - 4]);
+    [ -6, 6 ].forEach((x) => {
+      addMesh(this.statics, roundedBox(5.4, 4.4, 0.3, 0.08), M.darkTrim, [cx + x, 2.6, cz - 4 + shop.qd / 2 + 0.12]);
+    });
+    // Lift, tool bench and a stack of tyres outside.
+    for (let i = 0; i < 3; i += 1) {
+      const tyre = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.22, 8, 16), M.rubber);
+      tyre.rotation.x = Math.PI / 2;
+      tyre.position.set(block.x0 + 8, 0.5 + i * 0.3, block.z1 - 6);
+      this.statics.add(tyre);
+    }
+    this._sprawlSign(cx, 7.4, cz - 4 + shop.qd / 2 + 0.4, block.siteLabel, block.siteColor, { width: 15 });
+    this._sprawlSite(block, cx, cz + 12);
+  }
+
+  _sprawlClinic(block, style) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    const mass = this._sprawlMass(cx, cz - 2, 22, 26, 13, "plaster");
+    // The cross: two emissive bars on the street face.
+    addMesh(this.statics, roundedBox(4.4, 1.2, 0.3, 0.1), M.neonBlue, [cx, 10, cz - 2 + mass.qd / 2 + 0.24]);
+    addMesh(this.statics, roundedBox(1.2, 4.4, 0.3, 0.1), M.neonBlue, [cx, 10, cz - 2 + mass.qd / 2 + 0.24]);
+    addMesh(this.statics, roundedBox(9, 0.3, 5.4, 0.2), M.trim, [cx, 3.4, cz - 2 + mass.qd / 2 + 2.6]);
+    this._sprawlSign(cx, 6.2, cz - 2 + mass.qd / 2 + 0.4, block.siteLabel, block.siteColor, { width: 14 });
+    // An ambulance parked by the doors.
+    addMesh(this.statics, roundedBox(6.4, 2.3, 2.5, 0.24), M.paintWhite, [cx - 10, 1.45, block.z1 - 4]);
+    this.boxes.push({ x: cx - 10, z: block.z1 - 4, hx: 1.6, hz: 3.4 });
+    this._sprawlSite(block, cx, cz + 12);
+  }
+
+  _sprawlMarket(block, rng) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    // A double row of stalls under striped canopies.
+    const colors = ["#c9a227", "#7d1f22", "#2c4d63", "#4d5a45"];
+    for (let i = 0; i < 8; i += 1) {
+      const x = block.x0 + 8 + (i % 4) * 7.4;
+      const z = cz - 8 + Math.floor(i / 4) * 16;
+      addMesh(this.statics, roundedBox(6.2, 0.2, 5.4, 0.1), M.carPaint(colors[i % colors.length]),
+        [x, 3.1, z], [0.06, 0, 0]);
+      [-1, 1].forEach((side) => {
+        addMesh(this.statics, roundedBox(0.18, 2.9, 0.18, 0.05), M.steel, [x + side * 2.6, 1.7, z]);
+      });
+      addMesh(this.statics, roundedBox(4.6, 0.9, 3.0, 0.16), M.wood, [x, 1.2, z]);
+      this.boxes.push({ x, z, hx: 2.4, hz: 1.7 });
+      if (rng() < 0.5) {
+        addMesh(this.statics, roundedBox(1.0, 0.7, 1.0, 0.14), M.terracotta, [x + 1.4, 2.0, z]);
+      }
+    }
+    this._sprawlSign(cx, 5.4, block.z1 - 4, block.siteLabel, block.siteColor, { width: 15 });
+    this._sprawlSite(block, cx, cz);
+  }
+
+  _sprawlPolice(block, style) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    const mass = this._sprawlMass(cx, cz - 2, 24, 24, 11, style);
+    addMesh(this.statics, roundedBox(4.6, 0.5, 1.1, 0.16), M.neonBlue, [cx, 12.2, cz - 2]);
+    addMesh(this.statics, roundedBox(2.2, 0.5, 1.1, 0.16), M.paintRed, [cx + 3.4, 12.2, cz - 2]);
+    this._sprawlSign(cx, 7.4, cz - 2 + mass.qd / 2 + 0.4, block.siteLabel, block.siteColor, { width: 13 });
+    // Two cruisers behind a low wall.
+    [-1, 1].forEach((side) => {
+      addMesh(this.statics, roundedBox(6.2, 2.1, 2.4, 0.3), M.paintWhite, [cx + side * 7, 1.35, block.z1 - 6]);
+      addMesh(this.statics, roundedBox(2.4, 0.28, 2.5, 0.12), M.neonBlue, [cx + side * 7, 2.6, block.z1 - 6]);
+    });
+    this._sprawlSite(block, cx, cz + 12);
+  }
+
+  _sprawlDiner(block, style) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    this._sprawlMass(cx, cz - 4, 20, 17, 5.4, style);
+    addMesh(this.statics, roundedBox(20.4, 0.3, 0.3, 0.1), M.neonPink, [cx, 5.4, cz - 4 + 8.6]);
+    addMesh(this.statics, roundedBox(20.4, 0.3, 0.3, 0.1), M.neonPink, [cx, 4.9, cz - 4 + 8.6]);
+    this._sprawlSign(cx, 7.6, cz - 4 + 8.7, block.siteLabel, block.siteColor, { width: 12 });
+    // Car park and a couple of bays.
+    addMesh(this.statics, roundedBox(block.x1 - block.x0 - 2, 0.26, 16, 0.3), M.asphalt, [cx, 0.26, cz + 15]);
+    this._sprawlSite(block, cx, cz + 6);
+  }
+
+  _sprawlPlaza(block, rng) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    addMesh(this.statics, roundedBox(block.x1 - block.x0 - 3, 0.3, block.z1 - block.z0 - 3, 0.6),
+      M.stone, [cx, 0.3, cz]);
+    const basin = new THREE.Mesh(lathe([
+      [0, 0], [3.4, 0], [3.6, 0.3], [3.6, 0.8], [3.3, 0.95], [3.0, 0.95], [3.0, 0.34], [0, 0.34],
+    ], 24), M.stone);
+    basin.position.set(cx, 0.32, cz);
+    this.statics.add(basin);
+    const water = new THREE.Mesh(new THREE.CircleGeometry(2.9, 28), M.water);
+    water.rotation.x = -Math.PI / 2;
+    water.position.set(cx, 0.9, cz);
+    this.statics.add(water);
+    this.boxes.push({ x: cx, z: cz, hx: 3.6, hz: 3.6 });
+    for (let i = 0; i < 4; i += 1) {
+      const angle = (i / 4) * TAU + 0.4;
+      this._tree(cx + Math.cos(angle) * 11, cz + Math.sin(angle) * 14, 0.9 + rng() * 0.3);
+      this._bench(cx + Math.cos(angle) * 7, cz + Math.sin(angle) * 9, angle);
+    }
+    this._sprawlSign(cx, 4.6, block.z1 - 5, block.siteLabel, block.siteColor, { width: 14 });
+    this._sprawlSite(block, cx, cz);
+  }
+
+  _sprawlHotel(block, style) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    const mass = this._sprawlMass(cx, cz - 3, 24, 30, 30, style);
+    addMesh(this.statics, roundedBox(10, 0.35, 5.4, 0.16), M.trim, [cx, 4.2, cz - 3 + mass.qd / 2 + 2.8]);
+    this._sprawlSign(cx, 6.6, cz - 3 + mass.qd / 2 + 0.4, block.siteLabel, block.siteColor, { width: 12 });
+    // Valet rank: three bays painted on the forecourt.
+    addMesh(this.statics, roundedBox(block.x1 - block.x0 - 4, 0.26, 14, 0.3), M.asphalt, [cx, 0.26, cz + 19]);
+    this._sprawlSite(block, cx, cz + 14);
+  }
+
+  _sprawlSubway(block) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    // A glass entrance box, a lit "M", and the stairwell mouth.
+    addMesh(this.statics, roundedBox(10, 0.2, 10, 0.4), M.stone, [cx, 0.34, cz + 2]);
+    addMesh(this.statics, roundedBox(7.4, 3.6, 6.4, 0.16), M.storeGlass, [cx, 2.2, cz + 2]);
+    addMesh(this.statics, roundedBox(8.4, 0.5, 7.4, 0.16), M.trim, [cx, 4.2, cz + 2]);
+    addMesh(this.statics, roundedBox(3.2, 2.4, 0.2, 0.06), M.darkTrim, [cx, 0.6, cz + 6.4]);
+    this.boxes.push({ x: cx, z: cz + 2, hx: 4.6, hz: 3.6 });
+    // The pylon every rider looks for.
+    addMesh(this.statics, roundedBox(0.4, 6.4, 0.4, 0.08), M.steel, [cx + 6, 3.4, cz - 2]);
+    this._sprawlSign(cx + 6, 6.6, cz - 2, "METRO", block.siteColor, { width: 5, rotation: Math.PI / 2 });
+    const lamp = new THREE.PointLight(0x8fd0ff, 14, 22, 2);
+    lamp.position.set(cx + 6, 6.2, cz - 2);
+    this.statics.add(lamp);
+    this.stations.push({ label: block.siteLabel, x: cx, z: cz + 2, district: block.district });
+    this._sprawlSite(block, cx, cz + 2);
+  }
+
+  _stadiumBlock(block) {
+    const M = this.materials;
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    const rx = (block.x1 - block.x0) / 2 - 6;
+    const rz = (block.z1 - block.z0) / 2 - 6;
+    // Pitch and running track.
+    const pitch = new THREE.Mesh(new THREE.CircleGeometry(1, 40), M.grass);
+    pitch.scale.set(rx * 0.72, rz * 0.72, 1);
+    pitch.rotation.x = -Math.PI / 2;
+    pitch.position.set(cx, 0.32, cz);
+    this.statics.add(pitch);
+    const track = new THREE.Mesh(new THREE.RingGeometry(0.98, 1, 48), new THREE.MeshStandardMaterial({
+      color: 0x8c4a3c, roughness: 0.9,
+    }));
+    track.scale.set(rx * 0.84, rz * 0.84, 1);
+    track.rotation.x = -Math.PI / 2;
+    track.position.set(cx, 0.3, cz);
+    track.material.userData.shared = false;
+    this.statics.add(track);
+    // The bowl: a ring of angled seating blocks, tallest on the west side.
+    const segments = 22;
+    for (let i = 0; i < segments; i += 1) {
+      const angle = (i / segments) * TAU;
+      const x = cx + Math.cos(angle) * rx;
+      const z = cz + Math.sin(angle) * rz;
+      const height = 6 + (i % 4) * 1.6;
+      addMesh(this.statics, roundedBox(13, height, 9, 0.6), M.concrete,
+        [x, 0.24 + height / 2, z], [0, -angle, 0]);
+      // Concourse step in front of each block.
+      addMesh(this.statics, roundedBox(11, 0.5, 3.2, 0.2), M.trim,
+        [cx + Math.cos(angle) * (rx - 7), 1.1, cz + Math.sin(angle) * (rz - 7)], [0, -angle, 0]);
+    }
+    // Four floodlight masts.
+    [0, 1, 2, 3].forEach((i) => {
+      const angle = (i / 4) * TAU + Math.PI / 4;
+      const x = cx + Math.cos(angle) * (rx + 5);
+      const z = cz + Math.sin(angle) * (rz + 5);
+      addMesh(this.statics, roundedBox(0.6, 24, 0.6, 0.1), M.steel, [x, 12, z]);
+      addMesh(this.statics, roundedBox(5.4, 2.4, 0.5, 0.2), M.lampCool, [x, 24.4, z], [0, -angle, 0]);
+      const light = new THREE.PointLight(0xfff2d0, 30, 90, 2);
+      light.position.set(x, 24, z);
+      this.statics.add(light);
+    });
+    this._sprawlSign(cx, 9.4, block.z0 + 1.4, block.siteLabel, block.siteColor, { width: 22 });
+    this._sprawlSite(block, cx, cz);
   }
 
   // A building: mass with chamfered corners, slab bands, real windows on four
@@ -1283,6 +1805,102 @@ export class City {
     contactShadow(root, 1.6, 0.34, 0.02);
   }
 
+  // ── street loot ───────────────────────────────────────────────────────
+  // Crates scattered on the pavements. Each one maps to an item id the server
+  // already knows, so picking one up is a real inventory gain, not a prop.
+  _buildPickups() {
+    const M = this.materials;
+    const byService = {
+      clinic: { key: "medkit", label: "İlk yardım çantası", color: 0x9ff2c9 },
+      police: { key: "ammo", label: "Mermi kutusu", color: 0xffd166 },
+      fuel: { key: "ammo", label: "Yakıt bidonu", color: 0xffd166 },
+      diner: { key: "burger", label: "Loner Burger", color: 0xffb066 },
+      market: { key: "water", label: "Su şişesi", color: 0x8fd0ff },
+      hotel: { key: "water", label: "Su şişesi", color: 0x8fd0ff },
+      garage: { key: "scrap", label: "Hurda demet", color: 0x9fb4c7 },
+      subway: { key: "scrap", label: "Kayıp valiz", color: 0x9fb4c7 },
+    };
+    const byBlock = {
+      warehouse: { key: "scrap", label: "Hurda demet", color: 0x9fb4c7 },
+      lot: { key: "scrap", label: "Hurda demet", color: 0x9fb4c7 },
+      brick: { key: "leather", label: "Deri kayış", color: 0xc9a05b },
+      apartment: { key: "leather", label: "Deri kayış", color: 0xc9a05b },
+      park: { key: "leather", label: "Deri kayış", color: 0xc9a05b },
+      shops: { key: "water", label: "Su şişesi", color: 0x8fd0ff },
+      house: { key: "burger", label: "Loner Burger", color: 0xffb066 },
+    };
+    const blocks = [...this.coreBlocks, ...this.outerBlocks];
+    for (const block of blocks) {
+      if (this.pickups.length >= 120) break;
+      const loot = (block.service && byService[block.kind]) || byBlock[block.kind];
+      if (!loot) continue;
+      const rollCount = block.service ? 2 : (Math.random() < 0.5 ? 1 : 0);
+      for (let n = 0; n < rollCount && this.pickups.length < 120; n += 1) {
+        const inset = 1.6;
+        const width = block.x1 - block.x0;
+        const depth = block.z1 - block.z0;
+        let px;
+        let pz;
+        if (Math.random() < 0.5) {
+          px = block.x0 + inset + Math.random() * Math.max(0.1, width - inset * 2);
+          pz = Math.random() < 0.5 ? block.z0 + inset : block.z1 - inset;
+        } else {
+          pz = block.z0 + inset + Math.random() * Math.max(0.1, depth - inset * 2);
+          px = Math.random() < 0.5 ? block.x0 + inset : block.x1 - inset;
+        }
+        const group = new THREE.Group();
+        group.position.set(px, 0.26, pz);
+        group.rotation.y = Math.random() * TAU;
+        this.dynamic.add(group);
+        addMesh(group, roundedBox(0.72, 0.5, 0.72, 0.1), M.wood, [0, 0.25, 0]);
+        addMesh(group, roundedBox(0.78, 0.08, 0.78, 0.03), M.iron, [0, 0.54, 0]);
+        const glow = new THREE.Mesh(
+          new THREE.OctahedronGeometry(0.2, 0),
+          new THREE.MeshStandardMaterial({
+            color: loot.color, emissive: loot.color, emissiveIntensity: 2.4, roughness: 0.35,
+          })
+        );
+        glow.position.y = 1.24;
+        group.add(glow);
+        this.pickups.push({
+          id: `loot-${this.pickups.length}`,
+          key: loot.key,
+          label: loot.label,
+          color: loot.color,
+          x: px,
+          z: pz,
+          group,
+          glow,
+          phase: Math.random() * TAU,
+          taken: false,
+        });
+      }
+    }
+  }
+
+  nearestPickup(x, z, maxDistance = 3.6) {
+    let best = null;
+    let bestDistance = maxDistance;
+    for (const pickup of this.pickups) {
+      if (pickup.taken) continue;
+      const distance = Math.hypot(x - pickup.x, z - pickup.z);
+      if (distance < bestDistance) {
+        best = pickup;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  takePickup(pickup) {
+    if (!pickup || pickup.taken) return false;
+    pickup.taken = true;
+    pickup.group.visible = false;
+    const index = this.blips.findIndex((blip) => blip.pickupId === pickup.id);
+    if (index >= 0) this.blips.splice(index, 1);
+    return true;
+  }
+
   // ── skyline ───────────────────────────────────────────────────────────
   _buildSkyline() {
     const texture = facadeTexture({ tint: "#4a5260", lit: 0.34 });
@@ -1293,16 +1911,15 @@ export class City {
     const glassMaterial = new THREE.MeshStandardMaterial({
       color: 0x2c3a4a, roughness: 0.18, metalness: 0.85, envMapIntensity: 1.2,
     });
-    const count = 18;
+    const count = 46;
     for (let i = 0; i < count; i += 1) {
       const angle = (i / count) * TAU + 0.1;
-      const radius = 190 + Math.random() * 150;
+      const radius = CITY_EDGE.x * 1.06 + Math.random() * 420;
       const x = Math.cos(angle) * radius;
-      const z = Math.sin(angle) * radius * 0.8;
-      if (Math.abs(x) < 192 && Math.abs(z) < 132) continue;
-      const height = 28 + Math.random() * 86;
-      const w = 14 + Math.random() * 22;
-      const d = 14 + Math.random() * 20;
+      const z = Math.sin(angle) * radius * 0.78;
+      const height = 40 + Math.random() * 130;
+      const w = 18 + Math.random() * 30;
+      const d = 18 + Math.random() * 26;
       addMesh(this.statics, roundedBox(w, height, d, 0.9, { bevel: 0.2, uvScale: 0.7 }),
         Math.random() < 0.55 ? material : glassMaterial, [x, height / 2 - 1, z]);
       if (Math.random() < 0.4) {
@@ -1622,6 +2239,16 @@ export class City {
     return { x: CITY_EDGE.x - 2, z: CITY_EDGE.z - 2 };
   }
 
+  // The name the HUD and the map show for a world position.
+  districtAt(x, z) {
+    return districtNameAt(x, z);
+  }
+
+  // Metro stations, for the fast-travel list in the map overlay.
+  metroStations() {
+    return this.stations.map((station) => ({ ...station }));
+  }
+
   clamp(x, z) {
     return {
       x: Math.max(-this.edge.x, Math.min(this.edge.x, x)),
@@ -1676,6 +2303,14 @@ export class City {
     }
     for (const npc of this.npcs) {
       npc.label.position.set(npc.group.position.x, 2.18, npc.group.position.z);
+    }
+    for (const blinker of this.blinkers) {
+      blinker.mesh.visible = Math.sin(this.time * 2.2 + blinker.phase) > -0.2;
+    }
+    for (const pickup of this.pickups) {
+      if (pickup.taken) continue;
+      pickup.glow.position.y = 1.24 + Math.sin(this.time * 2.6 + pickup.phase) * 0.12;
+      pickup.glow.rotation.y += dt * 1.4;
     }
     for (const marker of this.doorMarkers) {
       const wave = 0.5 + Math.sin(this.time * 2.2 + marker.phase) * 0.5;

@@ -1,195 +1,157 @@
-// inventory.js — Aetherhold inventory (no-UI, data + logic layer)
-// Eşyalar 16 kategoriye ayrılır; her eşyada ağırlık, büyüklük, kullanım fonksiyonu ve etiket olabilir.
-// Bu dosya sadece veri+logik içerir; render/UI ayrı sırasında eklenir.
+// inventory.js — the bag the HUD and the hotbar read.
+//
+// The authoritative list of what the player owns lives on the server
+// (profile.items, saved in server.py). This module is the mirror: it resolves
+// icons and stacks, totals the weight, and picks the five items the hotbar
+// offers. Nothing here decides ownership — every equip, use or sale goes back
+// through GameClient.profile() and the reply is applied over the top.
+//
+// The Turkish screen that used to live here never rendered: it asked its host
+// for `host.element`, which the world does not have. This version keeps the
+// name and the constructor shape so world.initSystems() keeps working, and
+// draws the hotbar the old one was supposed to draw.
 
-export const INV_CATEGORIES = [
-  { id: "weapon",  label: i18n => i18n.t("inv.weapon"),  icon: "weapon" },
-  { id: "tool",    label: i18n => i18n.t("inv.tool"),    icon: "tool" },
-  { id: "food",    label: i18n => i18n.t("inv.food"),    icon: "food" },
-  { id: "drink",   label: i18n => i18n.t("inv.drink"),   icon: "drink" },
-  { id: "attach",  label: i18n => i18n.t("inv.attach"),  icon: "attach" },
-  { id: "metals",  label: i18n => i18n.t("inv.metals"),  icon: "metals" },
-  { id: "textile", label: i18n => i18n.t("inv.textile"), icon: "textile" },
-  { id: "documents", label: i18n => i18n.t("inv.documents"), icon: "documents" },
-  { id: "keys",    label: i18n => i18n.t("inv.keys"),    icon: "keys" },
-  { id: "misc",    label: i18n => i18n.t("inv.misc"),    icon: "misc" },
-];
+import { ITEM_CATALOGUE, itemPresentation } from "./profile.js";
+
+export const HOTBAR_SLOTS = 5;
+export const BAG_CAPACITY = 24;
+
+// Rough carry weights, by category. The server does not track mass, so the
+// figure is presentation only — but it gives the bag a shape.
+const CATEGORY_WEIGHT = {
+  weapon: 2.6, attach: 0.8, food: 0.4, drink: 0.6, metals: 2.2,
+  textile: 0.2, documents: 0.05, keys: 0.05, misc: 0.15,
+};
+
+// What the hotbar will offer, in this order: something to shoot, something to
+// eat, something to drink, and the rest of the consumables.
+const QUICK_ORDER = ["weapon", "food", "drink", "attach", "misc"];
 
 export class Inventory {
   constructor(ownerId) {
-    this.ownerId = ownerId;
-    this.slots = new Map();       // slotKey -> item
-    this.nextSlot = 0;
-    this.maxSlots = 40;
+    this.ownerId = ownerId || "local";
+    this.items = [];
+    this.equipped = "fists";
+    this.weapon = null;
+    this.ammo = 0;
+    this.cash = 0;
+    this.currency = "₺";
+    this.hotbar = new Array(HOTBAR_SLOTS).fill(null);
+    this.listeners = new Set();
+    this.updatedAt = 0;
   }
 
-  // Kanal > kategori > list şemasında kurgulanır. Slot key şablonu: `${category}:${seq}`.
-  add(item) {
-    if (this.slots.size >= this.maxSlots) return { ok: false, reason: "inv:full" };
-    const key = `${item.category}:${this.nextSlot++}`;
-    item.slotKey = key;
-    item.id = item.id || crypto.randomUUID?.() || Math.random().toString(36).slice(2);
-    item.ownerId = this.ownerId;
-    item.placer = item.placer || "inventory";
-    item.createdAt = Date.now();
-    this.slots.set(key, item);
-    return { ok: true, slotKey: key };
+  /** Mirror a server profile payload into the bag. */
+  sync(profileData) {
+    const data = profileData || null;
+    const rawItems = Array.isArray(data?.items) ? data.items : [];
+    this.items = rawItems
+      .filter((entry) => entry && entry.key && Number(entry.qty) > 0)
+      .map((entry) => {
+        const fallback = itemPresentation(entry.key);
+        const category = entry.category || fallback.category || "misc";
+        return {
+          key: entry.key,
+          qty: Number(entry.qty) || 1,
+          name: entry.name || fallback.name,
+          category,
+          icon: entry.icon || fallback.icon || "📦",
+          desc: entry.desc || fallback.desc || "",
+          price: Number(entry.price) || 0,
+          damage: Number(entry.damage) || 0,
+          range: Number(entry.range) || 0,
+          heal: Number(entry.heal) || 0,
+          ammo: Boolean(entry.ammo),
+          weight: CATEGORY_WEIGHT[category] ?? 0.1,
+        };
+      });
+    this.equipped = data?.equipped || "fists";
+    this.weapon = data?.weapon || null;
+    this.ammo = Number(data?.ammo) || 0;
+    this.cash = Number(data?.cash) || 0;
+    this.currency = data?.currency || "₺";
+    this.updatedAt = Date.now();
+    this._buildHotbar();
+    this.emit();
+    return this;
   }
 
-  remove(slotKey) {
-    const item = this.slots.get(slotKey);
-    if (!item) return null;
-    this.slots.delete(slotKey);
-    return item;
-  }
+  /** Fill the five quick slots: weapon first, then consumables by priority. */
+  _buildHotbar() {
+    const slots = new Array(HOTBAR_SLOTS).fill(null);
+    const used = new Set();
 
-  get(slotKey) { return this.slots.get(slotKey) || null; }
-
-  list(category) {
-    const out = [];
-    for (const item of this.slots.values()) {
-      if (item.category === category) out.push(item);
+    // Slot 1 is always the weapon in hand (or bare hands).
+    const weapon = this.items.find((item) => item.category === "weapon" && item.key === this.equipped)
+      || this.items.find((item) => item.category === "weapon");
+    if (weapon) {
+      slots[0] = { ...weapon, slot: "weapon" };
+      used.add(weapon.key);
+    } else {
+      slots[0] = {
+        key: "fists", qty: 1, name: this.weapon?.name || "Bare hands",
+        category: "weapon", icon: this.weapon?.icon || "✊", weight: 0, damage: this.weapon?.damage || 5,
+      };
     }
-    return out;
+
+    // Slots 2..5: the first items of each quick category, then anything left
+    // that can be used, then the rest of the kit so the bar is never empty
+    // while the pockets are not.
+    const usable = this.items.filter((item) => !used.has(item.key));
+    const ordered = [];
+    for (const category of QUICK_ORDER) {
+      for (const item of usable) {
+        if (item.category === category && !ordered.includes(item)) ordered.push(item);
+      }
+    }
+    for (const item of usable) if (!ordered.includes(item)) ordered.push(item);
+
+    for (let i = 1; i < HOTBAR_SLOTS && ordered.length; i += 1) {
+      const item = ordered.shift();
+      if (!item) break;
+      slots[i] = { ...item, slot: "quick" };
+    }
+    this.hotbar = slots;
   }
 
-  all() {
-    return Array.from(this.slots.values());
+  onChange(fn) {
+    if (typeof fn !== "function") return () => {};
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
   }
 
-  count() { return this.slots.size; }
+  emit() {
+    for (const fn of [...this.listeners]) {
+      try { fn(this); } catch (error) { console.error("[aetherhold] inventory listener failed", error); }
+    }
+  }
 
-  // Kullanım: eşyanın action fonksiyonunu çalıştırır, gerekirse eşyayı tüketir.
+  all() { return this.items.slice(); }
+
+  count() { return this.items.length; }
+
+  find(key) { return this.items.find((item) => item.key === key) || null; }
+
+  qty(key) { return this.find(key)?.qty || 0; }
+
+  get free() { return Math.max(0, BAG_CAPACITY - this.items.length); }
+
+  get weight() {
+    return this.items.reduce((sum, item) => sum + item.weight * item.qty, 0);
+  }
+
+  /** The item behind a hotbar slot (0-based), or null. */
+  slot(index) {
+    return this.hotbar[index] || null;
+  }
+
+  // PhoneSystem proxies item use through this name; the hotbar is the real
+  // caller, so keep it working for the phone screen too.
   use(slotKey, ctx) {
-    const item = this.slots.get(slotKey);
+    const item = this.find(slotKey);
     if (!item) return { ok: false, reason: "inv:missing" };
-    if (!item.action) return { ok: false, reason: "inv:not usable" };
-    const result = item.action(item, ctx);
-    if (result?.consumed) this.slots.delete(slotKey);
-    return { ok: true, result };
-  }
-
-  // Şablon eşya üretimi. Gerçek oyunda bu bir cot Shop/Acquire source'dan gelir.
-  static make(template) {
-    return {
-      ...template,
-      id: template.id || crypto.randomUUID?.() || Math.random().toString(36).slice(2),
-      createdAt: Date.now(),
-    };
+    return { ok: false, reason: "inv:server", item, ctx };
   }
 }
 
-// ── hazır şablonlar ────────────────────────────────────────────────────────
-// Bu liste oyunun içeriğini tanımlar; gerçek projede bir JSON/content pack ile beslenir.
-
-export const ITEM_TEMPLATES = {
-  // Silahlar
-  pistol: {
-    name: "Pistol",
-    plural: "Pistols",
-    category: "weapon",
-    weight: 0.9,
-    size: "1",
-    damage: 18,
-    range: "short",
-    action: (item, ctx) => {
-      if (!ctx.world) return { ok: false, reason: "no world" };
-      ctx.world.weapon = item.name;
-      ctx.world.stats.armor = Math.max(0, (ctx.world.stats.armor || 0) - 1);
-      return { ok: true, log: `${item.name} kullanıma geçildi`, consumed: false };
-    },
-  },
-  knife: {
-    name: "Dagger",
-    category: "weapon",
-    weight: 0.4,
-    damage: 14,
-    range: "melee",
-    action: (item, ctx) => {
-      if (!ctx.world) return { ok: false, reason: "no world" };
-      ctx.world.weapon = item.name;
-      return { ok: true, log: `Huçreye ${item.name} alınd`, consumed: false };
-    },
-  },
-  // Aksesuarlar / Araçlar
-  flashlight: {
-    name: "Fener",
-    category: "tool",
-    weight: 0.3,
-    action: (item, ctx) => {
-      ctx.world && (ctx.world.weapon = "fener");
-      return { ok: true, log: "Fener yanıyor", consumed: false };
-    },
-  },
-  lockpick: {
-    name: "Kilit Açma Seti",
-    category: "tool",
-    weight: 0.2,
-    action: (item, ctx) => {
-      return { ok: true, log: "Kilit açma denemesi...", consumed: true };
-    },
-  },
-  // Yemek / İçecek
-  burger: {
-    name: "Lonom Burger",
-    category: "food",
-    weight: 0.3,
-    restore: 12,
-    action: (item, ctx) => {
-      if (!ctx.world) return { ok: false, reason: "no world" };
-      ctx.world.stats.health = Math.min(100, (ctx.world.stats.health || 0) + (item.restore || 0));
-      return { ok: true, log: "Yemek yedi — sağlık arttı", consumed: true };
-    },
-  },
-  water: {
-    name: "Su Şişesi",
-    category: "drink",
-    weight: 0.5,
-    restore: 8,
-    action: (item, ctx) => {
-      if (!ctx.world) return { ok: false, reason: "no world" };
-      ctx.world.stats.health = Math.min(100, (ctx.world.stats.health || 0) + (item.restore || 0));
-      return { ok: true, log: "Su içti", consumed: true };
-    },
-  },
-  // Dokümanlar / Anahtarlar
-  id_card: {
-    name: "Kimlik Kartı",
-    category: "documents",
-    weight: 0.05,
-    description: "Aetherhold Kimlik",
-  },
-  key_mall: {
-    name: "Avm Anahtarı",
-    category: "keys",
-    weight: 0.05,
-    unlocks: ["mall_entrance"],
-    description: "Avm giriş anahtarı",
-  },
-  // Metal / Dokuma
-  steel_scrap: {
-    name: "Çelik Çöpü",
-    category: "metals",
-    weight: 2.0,
-    description: "Hırdavat için kullanılabilir.",
-  },
-  leather_strap: {
-    name: "Deri Kayış",
-    category: "textile",
-    weight: 0.15,
-    description: "Tamir veya üretim için.",
-  },
-  // Genel
-  wallet: {
-    name: "Cüzdan",
-    category: "misc",
-    weight: 0.1,
-    description: "Boş cüzdan.",
-  },
-  note: {
-    name: "Not Kağıdı",
-    category: "misc",
-    weight: 0.02,
-    description: "Bir şeyleri not etmek istersen.",
-  },
-};
+export { ITEM_CATALOGUE };

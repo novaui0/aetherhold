@@ -174,9 +174,15 @@ export class GtaHud {
 
     const map = this.map;
     if (map) {
-      // Blocks first: dark plates, then the roads drawn on top.
+      // Blocks first: dark plates, then the roads drawn on top. The city has
+      // over a thousand blocks now, so anything outside the radar circle is
+      // rejected by its centre before a single corner is projected.
       ctx.fillStyle = "rgba(38,52,46,0.85)";
+      const reach = this.zoomLevels[this.zoomIndex] * 1.15 + 80;
       for (const block of map.blocks) {
+        const bx = (block.x0 + block.x1) / 2;
+        const bz = (block.z0 + block.z1) / 2;
+        if (Math.abs(bx - px) > reach || Math.abs(bz - pz) > reach) continue;
         const corners = [
           project(block.x0, block.z0), project(block.x1, block.z0),
           project(block.x1, block.z1), project(block.x0, block.z1),

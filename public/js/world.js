@@ -313,9 +313,10 @@ export class World {
     // into the same air the sky is painted with.
     this.hazeColor = 0x8d7a83;
     this.scene.background = new THREE.Color(0x1a2138);
-    this.scene.fog = new THREE.Fog(this.hazeColor, 95, 430);
+    this.scene.fog = new THREE.Fog(this.hazeColor, 90, 640);
 
-    this.camera = new THREE.PerspectiveCamera(this.settings.fov, 1, 0.06, 900);
+    // A five-kilometre map needs the horizon in the frustum.
+    this.camera = new THREE.PerspectiveCamera(this.settings.fov, 1, 0.06, 2800);
     this.camera.position.set(0, 4, 12);
     this.camera.rotation.order = "YXZ";
 
@@ -372,8 +373,8 @@ export class World {
       : this.settings.quality === "ultra" ? 1.2 : 1.12;
     this.renderer.toneMappingExposure = grade;
     if (this.scene.fog) {
-      this.scene.fog.near = this.settings.quality === "cinematic" ? 55 : 40;
-      this.scene.fog.far = this.settings.quality === "cinematic" ? 320 : 240;
+      this.scene.fog.near = this.settings.quality === "cinematic" ? 70 : 50;
+      this.scene.fog.far = this.settings.quality === "cinematic" ? 900 : 560;
     }
     if (this.postfx) {
       this.postfx.enabled = settings.quality !== "low";
@@ -712,8 +713,15 @@ export class World {
       });
       return true;
     }
+    const pickup = this.region?.nearestPickup?.(this.position.x, this.position.z, 3.6);
+    if (pickup) {
+      if (this.onPickup) return this.onPickup(pickup) !== false;
+      if (this.onNotice) this.onNotice(`${pickup.label}`, "good");
+      return true;
+    }
     const site = this.region?.nearestSite(this.position.x, this.position.z, 22);
     if (site) {
+      if (this.onSite) return this.onSite(site) !== false;
       if (this.onNotice) this.onNotice(`${t(`site.${site.kind}`)} — ${site.services.join(", ")}`, "");
       return true;
     }
@@ -861,6 +869,7 @@ export class World {
     }
     if (this.inventoryUI) {
       this.inventoryUI.close();
+      this.inventoryUI.destroy?.();
       if (this.inventoryUI.panel && this.inventoryUI.panel.parentNode) {
         this.inventoryUI.panel.parentNode.removeChild(this.inventoryUI.panel);
       }
@@ -1387,10 +1396,13 @@ export class World {
       }
     }
     if (this.zone === "city") {
-      const streets = this.region?.radarData?.()?.streets;
-      if (Math.abs(this.position.z) < 20) this.areaName = streets ? streets.avenue : "VINEWOOD";
-      else if (Math.abs(this.position.x) < 20) this.areaName = "DOWNTOWN";
-      else this.areaName = this.region?.nearestSite(this.position.x, this.position.z, 46)?.label || "ELGIN DISTRICT";
+      // The district you are standing in, with the site you are next to taking
+      // precedence: a HUD that says GO-GO FUEL is more useful than one that
+      // says SOUTHPORT.
+      const site = this.region?.nearestSite(this.position.x, this.position.z, 40);
+      this.areaName = site?.label
+        || this.region?.districtAt?.(this.position.x, this.position.z)
+        || "DOWNTOWN";
       const near = this.region?.nearDoor(this.position.x, this.position.z);
       this.nearDoorName = near?.name || "";
     } else {
@@ -1628,6 +1640,7 @@ export class World {
     }
     if (this.inventoryUI) {
       this.inventoryUI.close();
+      this.inventoryUI.destroy?.();
       if (this.inventoryUI.panel && this.inventoryUI.panel.parentNode) {
         this.inventoryUI.panel.parentNode.removeChild(this.inventoryUI.panel);
       }

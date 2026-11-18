@@ -1105,7 +1105,7 @@ async function startSession(activeClient, data) {
     console.error("[aetherhold] world entry timed out — closing the loading screen");
     hideLoadingScreen();
     gameToast("Dünya kurulurken bir hata oluştu — ayrıntılar tarayıcı konsolunda.", "error");
-  }, 25000);
+  }, 120000);
 
   const roomName = $("hud-room-name");
   if (roomName) roomName.textContent = data.room?.name || "A hall";
@@ -1169,6 +1169,63 @@ async function startSession(activeClient, data) {
     else if (["courier", "hauler"].includes(npc.role)) gameUI?.open("contracts");
     else if (npc.role === "mechanic") openChest();
   };
+  // Street loot: the server owns the stack, the city owns the crate.
+  world.onPickup = async (pickup) => {
+    if (!pickup) return true;
+    if (!client) return true;
+    try {
+      const result = await client.profile("gather", { key: pickup.key });
+      if (result?.profile) {
+        profile.apply(result.profile);
+        world.setProfile(result.profile);
+        world.inventory?.sync(result.profile);
+      }
+      world.region?.takePickup?.(pickup);
+      gameToast(`${pickup.label} alındı`, "good");
+      audio.chime();
+    } catch (error) {
+      gameToast(error?.message || "Toplanamadı", "bad");
+    }
+    return true;
+  };
+  // Signage is not decoration: every service board does what it says.
+  world.onSite = (site) => {
+    const kind = site?.kind;
+    if (kind === "subway") {
+      const stations = world.region?.stations || [];
+      if (stations.length > 1) {
+        world._metroIndex = ((world._metroIndex ?? 0) + 1) % stations.length;
+        const stop = stations[world._metroIndex];
+        world.warpTo(stop.x, stop.z + 6);
+        gameToast(`Metro → ${stop.district || stop.label}`, "good");
+        audio.chime();
+      }
+      return true;
+    }
+    if (["market", "fuel", "diner", "clinic"].includes(kind)) {
+      gameUI?.open("market");
+      return true;
+    }
+    if (kind === "police") {
+      gameUI?.open("contracts");
+      return true;
+    }
+    if (kind === "garage") {
+      openChest();
+      return true;
+    }
+    if (kind === "hotel") {
+      if (world.stats.health >= 100) gameToast("Zaten zindesin", "");
+      else {
+        world.stats.health = 100;
+        gameToast("Bir duş, bir yatak — tam sağlık", "good");
+        audio.chime();
+      }
+      return true;
+    }
+    gameToast(`${site?.label || kind} — ${(site?.services || []).join(", ")}`, "");
+    return true;
+  };
   world.onAction = (action) => {
     sendChat(action === "draw" ? `/draw ${world?.weapon || "blade"}` : "/sheathe");
   };
@@ -1219,6 +1276,26 @@ async function startSession(activeClient, data) {
   // Telefon, envanter ve load screen sistemlerini başlat
   await world.initSystems(data.playerId);
 
+  // The quick bar speaks to the same server endpoint as the kit panel, so a
+  // potion drunk with "2" and one drunk from the panel are the same potion.
+  if (world.inventoryUI) {
+    world.inventoryUI.setApi(async (action, payload) => {
+      if (!client) throw new Error("The hall is not connected");
+      const result = await client.profile(action, payload);
+      if (result?.profile) profile.apply(result.profile);
+      if (result?.profile) world.setProfile(result.profile);
+      return result;
+    });
+    world.inventoryUI.setToast((message, kind) => gameToast(message, kind || ""));
+    world.inventoryUI.setOnHeal((amount) => {
+      if (!world || !amount) return;
+      world.stats.health = Math.min(100, world.stats.health + amount);
+      gameToast(`+${amount} health`, "good");
+      audio.chime();
+    });
+    world.inventoryUI.setOnBag(() => toggleGamePanel("kit"));
+  }
+
   // The sheet is server-owned; the UI is rebuilt per session so a stale panel
   // from the previous hall can never address the new room token.
   world.setProfile(null);
@@ -1227,6 +1304,7 @@ async function startSession(activeClient, data) {
   profileUnsub?.();
   profileUnsub = profile.onChange((state) => {
     world?.setProfile(state.data);
+    world?.inventory?.sync(state.data);
     updateScoreboard();
   });
   try {
@@ -1235,6 +1313,7 @@ async function startSession(activeClient, data) {
     gameUI.offers = sheet.offers || [];
     gameUI.shop = sheet.shop || [];
     world.setProfile(profile.data);
+    world.inventory?.sync(profile.data);
     updateScoreboard();
   } catch (error) {
     console.warn("[aetherhold] profile unavailable", error);
@@ -1764,6 +1843,9 @@ function bindOverlays() {
     } else if (key === "y") {
       event.preventDefault();
       toggleGamePanel("trade");
+    } else if (key >= "1" && key <= "5" && key.length === 1) {
+      event.preventDefault();
+      world?.inventoryUI?.useSlot(Number(key) - 1);
     } else if (key === "b") {
       event.preventDefault();
       enterBossGate();

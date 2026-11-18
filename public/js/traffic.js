@@ -147,6 +147,36 @@ export class Traffic {
       if (index === 1) this._addBike(1, { ...south, x: cx - 4.4 });
     });
 
+    // The ring road: four cars running the edge of the map in both
+    // directions, so no matter where you stand there is traffic somewhere.
+    const ringX = CITY_EDGE.x - 20;
+    const ringZ = CITY_EDGE.z - 20;
+    [
+      { x: -ringX + 40, z: -ringZ + 5, dir: 1, axis: "x", heading: Math.PI / 2, min: -ringX + 20, max: ringX - 20 },
+      { x: ringX - 40, z: ringZ - 5, dir: -1, axis: "x", heading: -Math.PI / 2, min: -ringX + 20, max: ringX - 20 },
+      { x: -ringX + 5, z: ringZ - 40, dir: -1, axis: "z", heading: Math.PI, min: -ringZ + 20, max: ringZ - 20 },
+      { x: ringX - 5, z: -ringZ + 40, dir: 1, axis: "z", heading: 0, min: -ringZ + 20, max: ringZ - 20 },
+    ].forEach((lane, index) => this._addCar(8 + index, lane));
+
+    // Outer arteries: a handful of cars crossing the districts north–south and
+    // east–west, far enough out that the sprawl never feels abandoned.
+    [0.34, 0.62, 0.86].forEach((factor, index) => {
+      const x = -CITY_EDGE.x * factor;
+      this._addCar(12 + index, {
+        x, z: -CITY_EDGE.z + 60, dir: 1, axis: "z", heading: 0,
+        min: -CITY_EDGE.z + 12, max: CITY_EDGE.z - 12,
+      });
+      this._addCar(15 + index, {
+        x: -x, z: CITY_EDGE.z - 60, dir: -1, axis: "z", heading: Math.PI,
+        min: -CITY_EDGE.z + 12, max: CITY_EDGE.z - 12,
+      });
+      const z = CITY_EDGE.z * factor * 0.8;
+      this._addCar(18 + index, {
+        x: -CITY_EDGE.x + 60, z: z + 6, dir: 1, axis: "x", heading: Math.PI / 2,
+        min: -CITY_EDGE.x + 12, max: CITY_EDGE.x - 12,
+      });
+    });
+
     // Parked motorcycles outside the garage, one by the diner.
     [
       [30, 62.6, Math.PI / 2],
@@ -188,7 +218,7 @@ export class Traffic {
 
     for (const vehicle of this.vehicles) {
       const { lane } = vehicle;
-      const step = (lane.axis === "x" ? 8.5 : 7.2) * dt;
+      const step = (lane.axis === "x" ? 12 : 10) * dt;
       vehicle.distance += step;
       const object = vehicle.object;
       if (lane.axis === "x") {

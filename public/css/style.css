@@ -1220,7 +1220,7 @@ input[type="number"] { max-width: 120px; }
 }
 .vehicle-foot b { color: var(--gold); font-variant-numeric: tabular-nums; }
 .vehicle-site { margin-left: auto; color: rgba(236, 233, 247, 0.55); font-size: 9.5px; }
-.vehicle-hint { margin-top: 6px; font-size: 9.5px; color: rgba(236, 233, 247, 0.4); letter-spacing: 0.03em; }
+.vehicle-hint { margin-top: 6px; font-size: 9.5px; color: rgba(236, 233, 247, 0.4); letter-spacing: 0.03em; word-break: break-word; overflow-wrap: anywhere; max-width: 100%; line-height: 1.35; }
 @media (max-width: 900px) { .vehicle-hud { width: 208px; transform: scale(0.9); transform-origin: bottom right; } .vehicle-hud:not(.hidden) ~ .toast-stack { bottom: 248px; } }
 
 /* ══ Road map overlay ════════════════════════════════════════════════════ */
@@ -1926,3 +1926,53 @@ body.raid-mode #game .chat-log { max-height: 30vh; }
 /* Mobile chat is a tray behind 💬: the new desktop dock must not leak in. */
 body.mobile-mode #game .chat { display: none; bottom: calc(max(10px, env(safe-area-inset-bottom)) + 2px); max-height: none; }
 body.mobile-mode.touch-chat-open #game .chat { display: flex; }
+
+/* ── Quick bar (inventory hotbar) ── */
+.inv-hotbar {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  z-index: 41; display: flex; align-items: flex-end; gap: 10px;
+  pointer-events: none; font-family: Inter, "Segoe UI", system-ui, sans-serif;
+}
+.inv-hot { display: flex; gap: 7px; pointer-events: auto; }
+.inv-slot {
+  position: relative; width: 74px; padding: 8px 6px 6px;
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  background: linear-gradient(180deg, rgba(12, 14, 22, 0.82), rgba(6, 7, 12, 0.9));
+  border: 1px solid rgba(242, 201, 125, 0.16); border-radius: 9px;
+  color: #d9d3e8; cursor: pointer; backdrop-filter: blur(8px);
+  transition: border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+.inv-slot:hover { border-color: rgba(242, 201, 125, 0.45); transform: translateY(-3px); }
+.inv-slot.empty { opacity: 0.5; }
+.inv-slot.equipped {
+  border-color: rgba(242, 201, 125, 0.7);
+  box-shadow: 0 0 16px rgba(242, 201, 125, 0.18), inset 0 0 12px rgba(242, 201, 125, 0.1);
+}
+.inv-slot-key {
+  position: absolute; top: 3px; left: 5px; font-size: 8.5px; letter-spacing: 0.1em;
+  color: rgba(242, 201, 125, 0.75);
+}
+.inv-slot-icon { font-size: 23px; line-height: 1.15; }
+.inv-slot-qty {
+  position: absolute; top: 3px; right: 5px; font-size: 9px; font-weight: 600;
+  color: #fff4dd; font-variant-numeric: tabular-nums;
+}
+.inv-slot-name {
+  font-size: 8.5px; letter-spacing: 0.05em; text-transform: uppercase;
+  color: #a9a2bd; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.inv-bag-btn {
+  pointer-events: auto; display: flex; align-items: center; gap: 7px;
+  padding: 9px 12px; border-radius: 9px; cursor: pointer;
+  background: rgba(8, 10, 16, 0.86); border: 1px solid rgba(242, 201, 125, 0.22);
+  color: #fff4dd; font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase;
+  backdrop-filter: blur(8px);
+}
+.inv-bag-btn:hover { border-color: rgba(242, 201, 125, 0.5); color: #f2c97d; }
+.inv-bag-count { color: #a9a2bd; letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
+.inv-bag-btn kbd {
+  font: inherit; font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  border: 1px solid rgba(242, 201, 125, 0.3); color: #f2c97d;
+}
+body.mobile-mode .inv-hotbar { bottom: 86px; transform: translateX(-50%) scale(0.86); }
+body.mobile-mode .inv-slot { width: 62px; }
